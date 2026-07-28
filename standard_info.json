@@ -1,0 +1,562 @@
+{
+    "codebase_version": "v2.1",
+    "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+    "features": {
+      "action.eef.left.pose": {
+        "dtype": "float32",
+        "names": [
+          "left_eef_position_x_m", // 单位为m
+          "left_eef_position_y_m",
+          "left_eef_position_z_m",
+          "left_eef_rotvec_rx",
+          "left_eef_rotvec_ry",
+          "left_eef_rotvec_rz"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "action.eef.right.pose": {
+        "dtype": "float32",
+        "names": [
+          "right_eef_position_x_m",
+          "right_eef_position_y_m",
+          "right_eef_position_z_m",
+          "right_eef_rotvec_rx",
+          "right_eef_rotvec_ry",
+          "right_eef_rotvec_rz"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "action.eef.primary.pose": {
+        "dtype": "float32",
+        "names": [
+          "primary_eef_position_x_m",
+          "primary_eef_position_y_m",
+          "primary_eef_position_z_m",
+          "primary_eef_rotvec_rx",
+          "primary_eef_rotvec_ry",
+          "primary_eef_rotvec_rz"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "action.arm.left.joint_position": {
+        "dtype": "float32",
+        "names": [
+          "left_joint_1_rad", // 单位为rad
+          "left_joint_2_rad",
+          "left_joint_3_rad",
+          "left_joint_4_rad",
+          "left_joint_5_rad",
+          "left_joint_6_rad"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "action.arm.right.joint_position": {
+        "dtype": "float32",
+        "names": [
+          "right_joint_1_rad",
+          "right_joint_2_rad",
+          "right_joint_3_rad",
+          "right_joint_4_rad",
+          "right_joint_5_rad",
+          "right_joint_6_rad"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "action.arm.primary.joint_position": {
+        "dtype": "float32",
+        "names": [
+          "left_joint_1_rad", // 单位为rad
+          "left_joint_2_rad",
+          "left_joint_3_rad",
+          "left_joint_4_rad",
+          "left_joint_5_rad",
+          "left_joint_6_rad"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "action.gripper.left.closedness": {
+        "dtype": "float32",
+        "names": [
+          "left_closedness"
+        ],
+        "shape": [
+          1
+        ]
+      },
+      "action.gripper.right.closedness": {
+        "dtype": "float32",
+        "names": [
+          "right_closedness"
+        ],
+        "shape": [
+          1
+        ]
+      },
+      "action.gripper.primary.closedness": {
+        "dtype": "float32",
+        "names": [
+          "primary_closedness"
+        ],
+        "shape": [
+          1
+        ]
+      },
+      "action.geometry.eef.left.quaternion_wxyz": {
+        "dtype": "float32",
+        "names": [
+          "w",
+          "x",
+          "y",
+          "z"
+        ],
+        "shape": [
+          4
+        ]
+      },
+      "action.geometry.eef.right.quaternion_wxyz": {
+        "dtype": "float32",
+        "names": [
+          "w",
+          "x",
+          "y",
+          "z"
+        ],
+        "shape": [
+          4
+        ]
+      },
+      "action.geometry.eef.primary.quaternion_wxyz": {
+        "dtype": "float32",
+        "names": [
+          "w",
+          "x",
+          "y",
+          "z"
+        ],
+        "shape": [
+          4
+        ]
+      },
+      "observation.images.camera_top": {  // 约定为mp4格式，
+        "dtype": "video",
+        "info": {
+          "has_audio": false,
+          "video.channels": 3,
+          "video.codec": "h264",
+          "video.fps": 30,
+          "video.height": 720,
+          "video.is_depth_map": false,
+          "video.pix_fmt": "yuv420p",
+          "video.width": 1280
+        },
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "shape": [
+          720,
+          1280,
+          3
+        ]
+      },
+      "observation.images.camera_wrist_left": {
+        "dtype": "video",
+        "info": {
+          "has_audio": false,
+          "video.channels": 3,
+          "video.codec": "h264",
+          "video.fps": 30,
+          "video.height": 720,
+          "video.is_depth_map": false,
+          "video.pix_fmt": "yuv420p",
+          "video.width": 1280
+        },
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "shape": [
+          720,
+          1280,
+          3
+        ]
+      },
+      "observation.images.camera_wrist_right": {
+        "dtype": "video",
+        "info": {
+          "has_audio": false,
+          "video.channels": 3,
+          "video.codec": "h264",
+          "video.fps": 30,
+          "video.height": 720,
+          "video.is_depth_map": false,
+          "video.pix_fmt": "yuv420p",
+          "video.width": 1280
+        },
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "shape": [
+          720,
+          1280,
+          3
+        ]
+      },
+      "observation.images.camera_overhead_opposite_left": {
+        "dtype": "video",
+        "info": {
+          "has_audio": false,
+          "video.channels": 3,
+          "video.codec": "h264",
+          "video.fps": 30,
+          "video.height": 720,
+          "video.is_depth_map": false,
+          "video.pix_fmt": "yuv420p",
+          "video.width": 1280
+        },
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "shape": [
+          720,
+          1280,
+          3
+        ]
+      },
+      "observation.images.camera_overhead_opposite_right": {
+        "dtype": "video",
+        "info": {
+          "has_audio": false,
+          "video.channels": 3,
+          "video.codec": "h264",
+          "video.fps": 30,
+          "video.height": 720,
+          "video.is_depth_map": false,
+          "video.pix_fmt": "yuv420p",
+          "video.width": 1280
+        },
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "shape": [
+          720,
+          1280,
+          3
+        ]
+      },
+      "observation.images.camera_overhead_sameside_left": {
+        "dtype": "video",
+        "info": {
+          "has_audio": false,
+          "video.channels": 3,
+          "video.codec": "h264",
+          "video.fps": 30,
+          "video.height": 720,
+          "video.is_depth_map": false,
+          "video.pix_fmt": "yuv420p",
+          "video.width": 1280
+        },
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "shape": [
+          720,
+          1280,
+          3
+        ]
+      },
+      "observation.images.camera_overhead_sameside_right": {
+        "dtype": "video",
+        "info": {
+          "has_audio": false,
+          "video.channels": 3,
+          "video.codec": "h264",
+          "video.fps": 30,
+          "video.height": 720,
+          "video.is_depth_map": false,
+          "video.pix_fmt": "yuv420p",
+          "video.width": 1280
+        },
+        "names": [
+          "height",
+          "width",
+          "channels"
+        ],
+        "shape": [
+          720,
+          1280,
+          3
+        ]
+      },
+      "observation.state.eef.left.pose": {
+        "dtype": "float32",
+        "names": [
+          "left_eef_position_x_m", // 单位为m
+          "left_eef_position_y_m",
+          "left_eef_position_z_m",
+          "left_eef_rotvec_rx",
+          "left_eef_rotvec_ry",
+          "left_eef_rotvec_rz"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "observation.state.eef.right.pose": {
+        "dtype": "float32",
+        "names": [
+          "right_eef_position_x_m",
+          "right_eef_position_y_m",
+          "right_eef_position_z_m",
+          "right_eef_rotvec_rx",
+          "right_eef_rotvec_ry",
+          "right_eef_rotvec_rz"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "observation.state.eef.primary.pose": {
+        "dtype": "float32",
+        "names": [
+          "primary_eef_position_x_m",
+          "primary_eef_position_y_m",
+          "primary_eef_position_z_m",
+          "primary_eef_rotvec_rx",
+          "primary_eef_rotvec_ry",
+          "primary_eef_rotvec_rz"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "observation.state.arm.left.joint_position": {
+        "dtype": "float32",
+        "names": [
+          "left_joint_1_rad",
+          "left_joint_2_rad",
+          "left_joint_3_rad",
+          "left_joint_4_rad",
+          "left_joint_5_rad",
+          "left_joint_6_rad"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "observation.state.arm.right.joint_position": {
+        "dtype": "float32",
+        "names": [
+          "right_joint_1_rad",
+          "right_joint_2_rad",
+          "right_joint_3_rad",
+          "right_joint_4_rad",
+          "right_joint_5_rad",
+          "right_joint_6_rad"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "observation.state.arm.primary.joint_position": {
+        "dtype": "float32",
+        "names": [
+          "primary_joint_1_rad",
+          "primary_joint_2_rad",
+          "primary_joint_3_rad",
+          "primary_joint_4_rad",
+          "primary_joint_5_rad",
+          "primary_joint_6_rad"
+        ],
+        "shape": [
+          6
+        ]
+      },
+      "observation.state.gripper.left.closedness": {
+        "dtype": "float32",
+        "names": [
+          "left_closedness"
+        ],
+        "shape": [
+          1
+        ]
+      },
+      "observation.state.gripper.right.closedness": {
+        "dtype": "float32",
+        "names": [
+          "right_closedness"
+        ],
+        "shape": [
+          1
+        ]
+      },
+      "observation.state.gripper.primary.closedness": {
+        "dtype": "float32",
+        "names": [
+          "primary_closedness"
+        ],
+        "shape": [
+          1
+        ]
+      },
+      "observation.geometry.eef.left.quaternion_arm_wxyz": {
+        "dtype": "float32",
+        "names": [
+          "w",
+          "x",
+          "y",
+          "z"
+        ],
+        "shape": [
+          4
+        ]
+      },
+      "observation.geometry.eef.right.quaternion_arm_wxyz": {
+        "dtype": "float32",
+        "names": [
+          "w",
+          "x",
+          "y",
+          "z"
+        ],
+        "shape": [
+          4
+        ]
+      },
+      "observation.geometry.eef.primary.quaternion_wxyz": {
+        "dtype": "float32",
+        "names": [
+          "w",
+          "x",
+          "y",
+          "z"
+        ],
+        "shape": [
+          4
+        ]
+      },
+      "observation.state.hand_features":{
+        "dtype": "float32",
+        "names": null,
+        "shape": [
+          1
+        ]
+      },
+      "extrinsic": {
+        "camera_top.T_ArmLeft_CameraTop": {
+          "dtype": "float32",
+          "names": null,
+          "shape": [
+            4, 4
+          ]
+        },
+        "camera_top.T_ArmRight_CameraTop": {
+          "dtype": "float32",
+          "names": null,
+          "shape": [
+            4, 4
+          ]
+        },
+        "camera_top.T_ArmLeft_CameraWristLeft": {
+          "dtype": "float32",
+          "names": null,
+          "shape": [
+            4, 4
+          ]
+        },
+        "camera_top.T_ArmRight_CameraWristRight": {
+          "dtype": "float32",
+          "names": null,
+          "shape": [
+            4, 4
+          ]
+        }
+      },
+      "episode_index": {
+        "dtype": "int64",
+        "names": null,
+        "shape": [
+          1
+        ]
+      },
+      "frame_index": {  // 帧索引，从0开始
+        "dtype": "int64",
+        "names": null,
+        "shape": [
+          1
+        ]
+      },
+      "index": {  // 全局累积帧索引
+        "dtype": "int64",
+        "names": null,
+        "shape": [
+          1
+        ]
+      },
+      "task_index": {
+        "dtype": "int64",
+        "names": null,
+        "shape": [
+          1
+        ]
+      },
+      "timestamp": { // episode内相对时间戳，单位为秒，从0开始
+        "dtype": "float32",
+        "names": null,
+        "shape": [
+          1
+        ]
+      }
+    },
+    "intrinsic": {
+      "camera_top.matrix": {
+        "dtype": "float32",
+        "names": null,
+        "shape": [
+          3, 3
+        ]
+      },
+      "camera_top.dist_coeffs": {
+        "dtype": "float32",
+        "names": null,
+        "shape": [
+          5
+        ]
+      }
+    },
+    "state_action_delay": 1,
+    "fps": 30, // 帧率，数据集/单条 范畴内做通过timestamp做验证
+    "embodiment": "agilex",
+    "prompt_template": "embodiment: {embodiment}\ninstruction: {instruction}\nhorizon: {horizon}\nfps: {fps}\ncamera view direction: {camera_view_direction}",
+    "camera_view_direction": "arm_side",
+    "horizon": "1000",
+    "total_chunks": 1,
+    "total_episodes": 2,
+    "total_frames": 4975,
+    "total_tasks": 129,
+    "total_videos": 6,
+    "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+  }
+  

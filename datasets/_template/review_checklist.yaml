@@ -1,0 +1,33 @@
+# Manual review gate (P2). Status: pending | approved | blocked
+#
+# After approving eef_direction / gripper_closedness, write numeric corrections
+# into config.yaml → review_corrections (not here / not keymap):
+#   extrinsic_rotation_correction:
+#     camera_top.T_ArmLeft_CameraTop  — 3x3/4x4 R or null (T'=R@T; only this matrix)
+#     camera_top.T_ArmRight_CameraTop — 3x3/4x4 R or null
+#   gripper_closedness_correction  — {action, state}: each {scale, offset, clip?}
+dataset: REPLACE_ME
+updated_at: null
+reviewer: null
+
+items:
+  eef_direction:
+    status: pending
+    notes: >-
+      FIRST: confirm eef frame axes / units (+Z forward) AND extrinsic motion for
+      camera_top.T_ArmLeft_CameraTop / T_ArmRight_CameraTop. If an arm needs a
+      rotation fix, set that key under config.yaml review_corrections.extrinsic_rotation_correction
+      to a 3x3 or 4x4 R (T'=R@T). Other extrinsics are not transformed.
+      Stage5 eef transforms remain OFF by default.
+  gripper_closedness:
+    status: pending
+    notes: >-
+      Confirm 0=open, 1=closed. If inverted or scaled wrong, set config.yaml
+      review_corrections.gripper_closedness_correction with separate "action" / "state"
+      {scale: a, offset: b} per side (c'=a*c+b; pipeline clips to [0,1] by default).
+  camera_naming:
+    status: pending
+    notes: "Standard camera_* names; camera_top (or overhead equivalent) present"
+  fps_stable:
+    status: pending
+    notes: "Sampled timestamp / fps stability OK"

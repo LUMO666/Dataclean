@@ -151,15 +151,3 @@ def filter_table_by_indices(table, indices: np.ndarray):
     if indices.size == 0:
         return table.slice(0, 0)
     return table.take(pa.array(indices, type=pa.int64()))
-
-
-def write_episode_with_validity_mask(path: Path, table, step_validity_mask: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if "step_validity_mask" in table.column_names:
-        table = table.drop(["step_validity_mask"])
-    mask_col = pa.array(
-        [np.array([int(v)], dtype=np.int8) for v in step_validity_mask],
-        type=pa.list_(pa.int8(), 1),
-    )
-    table = table.append_column("step_validity_mask", mask_col)
-    pq.write_table(table, path, compression="snappy")

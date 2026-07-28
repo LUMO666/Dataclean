@@ -1,0 +1,39 @@
+dataset:
+  name: robomind_ur
+  root: /mnt/project_rlinf_hs/dreamzero_pretrain_data/Robomind2.0/ur_lerobot
+  embodiment: robomind_ur
+  fps: 30
+  layout: single_root
+
+pipeline:
+  num_workers: 64
+  export_workers: 16
+  output_mode: report
+  force_skip_gate: false
+
+media:
+  target_height: 384
+  max_keyframe_interval: 10
+  require_camera_top: false
+
+speed_align:
+  enabled: false
+  target_fps: 30
+
+temporal_align:
+  apply_delay: false
+  mode: stats
+  manual_delay: null
+
+stage2:
+  fill_missing_action_eef: true
+
+review_corrections:
+  extrinsic_rotation_correction:
+    camera_top.T_ArmLeft_CameraTop: null
+    camera_top.T_ArmRight_CameraTop: null
+  gripper_closedness_correction:
+    action: null
+    state: null
+
+quality_config_path: qwen-manip-preprocess/config/robomind_ur_lerobot.yaml

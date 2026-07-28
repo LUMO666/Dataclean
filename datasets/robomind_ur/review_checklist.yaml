@@ -1,0 +1,23 @@
+# Manual review gate (P2). Status: pending | approved | blocked
+dataset: robomind_ur
+updated_at: null
+reviewer: null
+
+items:
+  eef_direction:
+    status: pending
+    notes: >-
+      FIRST: confirm UR EE frame / +Z forward AND ArmLeft/Right↔CameraTop extrinsics.
+      Correction: config.yaml review_corrections.extrinsic_rotation_correction keys
+      camera_top.T_ArmLeft_CameraTop / T_ArmRight_CameraTop (T'=R@T). Stage5 OFF.
+  gripper_closedness:
+    status: pending
+    notes: >-
+      Confirm gripper polarity (0=open, 1=closed).
+      Correction: config.yaml review_corrections.gripper_closedness_correction.action / .state {scale,offset}.
+  camera_naming:
+    status: pending
+    notes: "Map available cameras to camera_top if possible"
+  fps_stable:
+    status: pending
+    notes: "fps / timestamp check"

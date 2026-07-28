@@ -1,0 +1,10 @@
+{
+  "source": "REPLACE_ME",
+  "target": "Dataclean/standard_info.json",
+  "notes": {},
+  "images": {},
+  "action": {},
+  "observation_state": {},
+  "intrinsic": {},
+  "extrinsic": {}
+}

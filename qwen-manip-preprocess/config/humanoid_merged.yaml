@@ -14,19 +14,28 @@ dataset:
 
 pipeline:
   num_workers: 128
-  output_mode: both  # report | filter | both
+  output_mode: both  # report | filter | both  (filter/both export cropped LeRobot dataset directly)
   min_episode_length: 30
   action_zero_epsilon: 1.0e-4
   stage1_post_zero_grace_frames: 60
-  discard_short_prefix: false
+  discard_short_prefix: True
+  export_workers: 16  # parallel LeRobot export processes; 1 = sequential
+  parallel_videos: true  # export 3 camera streams concurrently per episode
+  recompute_video_stats: false  # skip ffmpeg pixel sampling during export
+  skip_alignment_verify: false  # set true to skip post-export alignment scan
+  ignore_episodes_path: config/humanoid_merged_ignore_no_calibration.json
 
 state_action_alignment:
-  enabled: true
+  enabled: true  # compute lag stats when temporal_align.mode=stats
   max_lag_frames: 5
   diff_epsilon: 1.0e-4
   min_active_samples: 10
   default_lag: 1
   fixed_lag: null  # null => use global cross-correlation mean lag
+  # Prefer datasets/*/config.yaml temporal_align for apply_delay / mode / manual_delay
+  apply_delay: false
+  mode: stats
+  manual_delay: null
   stats:
     recompute: true
     cache_path: cache/state_action_lag.npz
@@ -71,7 +80,7 @@ stage2:
     savgol_polyorder: 3
   alignment:
     max_lag_frames: 5
-    diff_epsilon: 1.0e-4
+    diff_epsilon: 1.0e-3
     min_active_samples: 10
   thresholds:
     da_per_dim: 0.65
@@ -110,7 +119,9 @@ stage4:
   change_epsilon: 0.0
 
 stage5:
-  enabled: true
+  # Default off: do not transform eef in-pipeline. Confirm eef direction via
+  # datasets/*/review_checklist.yaml item `eef_direction` (ManualGate, first slot).
+  enabled: false
   reference_frame: camera_top_frame0
   rotation_correction_euler_xyz: [0.0, -1.5707963267948966, 0.0]
   humanoid_camera_extrinsic_key: camera_front_to_arm_left

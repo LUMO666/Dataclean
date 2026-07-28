@@ -1,0 +1,41 @@
+dataset:
+  name: egodex_lerobot_v21
+  root: /mnt/project_rlinf_hs/dreamzero_pretrain_data/22T_data/egodex_lerobot_v21
+  embodiment: egodex
+  fps: 30
+  layout: part_task
+
+pipeline:
+  num_workers: 64
+  export_workers: 16
+  output_mode: both
+  force_skip_gate: false
+
+media:
+  target_height: 384
+  max_keyframe_interval: 10
+  require_camera_top: true
+
+speed_align:
+  enabled: true
+  golden_embodiment: humanoid
+  golden_speed_mps: 0.08
+  target_fps: 30
+
+temporal_align:
+  apply_delay: false
+  mode: stats
+  manual_delay: null
+
+stage2:
+  fill_missing_action_eef: true
+
+review_corrections:
+  extrinsic_rotation_correction:
+    camera_top.T_ArmLeft_CameraTop: null
+    camera_top.T_ArmRight_CameraTop: null
+  gripper_closedness_correction:
+    action: null
+    state: null
+
+quality_config_path: qwen-manip-preprocess/config/egodex_22T.yaml

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import multiprocessing as mp
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -8,11 +10,10 @@ from typing import Any
 import numpy as np
 import yaml
 
+from robot_data_processing.ignore_list import filter_episode_indices, load_ignore_episode_list, write_ignore_episode_list
 from robot_data_processing.loader import (
     episode_parquet_path,
     read_episode_canonical,
-    read_episode_table,
-    write_episode_with_validity_mask,
 )
 from robot_data_processing.mask import (
     build_frame_keep_mask,
@@ -20,18 +21,25 @@ from robot_data_processing.mask import (
     compute_per_joint_stage1_exclude,
 )
 from robot_data_processing.preprocess import (
-    apply_robomind_temporal_alignment,
     expand_compact_exclude_to_action,
-    extract_state_action_from_table,
-    update_table_action_columns,
 )
 from robot_data_processing.transforms import robomind_ur_compact_teleop
-from robot_data_processing.report import build_quality_report, write_exclusion_log, write_quality_report
+from robot_data_processing.lerobot_export import export_lerobot_from_results, verify_lerobot_alignment
+from robot_data_processing.report import (
+    build_quality_report,
+    write_exclusion_log,
+    write_optimal_lags,
+    write_quality_report,
+)
 from robot_data_processing.schema import DatasetSchema, schema_from_yaml
 from robot_data_processing.stage1_stats import Stage1GlobalStats, load_or_compute_stage1_stats
 from robot_data_processing.state_action_lag_stats import load_or_compute_action_state_lag
 from robot_data_processing.stages.stage1_sudden_change import Stage1Config, run_stage1
-from robot_data_processing.stages.stage2_trend_alignment import Stage2Config, run_stage2
+from robot_data_processing.stages.stage2_trend_alignment import (
+    Stage2Config,
+    canonical_to_stage2_fields,
+    run_stage2_on_fields,
+)
 from robot_data_processing.stages.stage3_extreme_value import Stage3Config, run_stage3
 from robot_data_processing.stages.stage4_static_interval import Stage4Config, run_stage4
 from robot_data_processing.stages.stage5_frame_alignment import (
@@ -42,9 +50,10 @@ from robot_data_processing.stages.stage5_frame_alignment import (
 from robot_data_processing.stages.state_action_temporal_alignment import (
     StateActionAlignConfig,
     alignment_metadata,
-    apply_state_action_temporal_alignment,
-    matched_alignment_dims,
+    parse_temporal_align_config,
     resolve_alignment_lag,
+    resolve_p4_plan,
+    resolve_state_action_delay,
 )
 from robot_data_processing.stats import load_or_compute_stats
 from robot_data_processing.types import EpisodeResult, GlobalStats
@@ -76,6 +85,11 @@ class PipelineConfig:
     action_zero_epsilon: float = 1e-4
     stage1_post_zero_grace_frames: int = 0
     discard_short_prefix: bool = False
+    recompute_video_stats: bool = False
+    export_workers: int | None = None
+    parallel_videos: bool = True
+    skip_alignment_verify: bool = False
+    ignore_episodes_path: Path | None = None
 
 
 _WORKER_STATE: dict[str, Any] = {}
@@ -149,7 +163,18 @@ def process_episode(episode_index: int, pipe_cfg: PipelineConfig | None = None) 
         startup_exclude_per_joint=stage1_exclude,
         global_stats=stage1_stats,
     )
-    s2 = run_stage2(state, action, s2_cfg)
+    # Stage2 DA on standard-key fields (eef pose + arm joints); may fill action.eef
+    # using global P4 lag_mean (cfg.alignment_lag), not per-episode joint lag.
+    stage2_fields = canonical_to_stage2_fields(
+        state, action, embodiment=schema.embodiment
+    )
+    align_stats = _WORKER_STATE.get("align_stats")
+    align_lag = (
+        cfg.alignment_lag
+        if cfg.alignment_lag is not None
+        else resolve_alignment_lag(align_cfg, align_stats)
+    )
+    s2 = run_stage2_on_fields(stage2_fields, s2_cfg, fill_lag=align_lag)
     s3 = run_stage3(
         state, action, stats, s3_cfg, schema=schema, startup_exclude_per_joint=startup_exclude
     )
@@ -176,7 +201,7 @@ def process_episode(episode_index: int, pipe_cfg: PipelineConfig | None = None) 
     kept_frames = int(step_validity_mask.sum())
     first_removed = int(np.flatnonzero(step_validity_mask == 0)[0]) if kept_frames < num_frames else None
 
-    discard = False
+    discard = bool(s2.discard)
     if cfg.discard_short_prefix and kept_frames < cfg.min_episode_length:
         discard = True
         reasons.append(f"kept_frames={kept_frames}<{cfg.min_episode_length}")
@@ -195,8 +220,6 @@ def process_episode(episode_index: int, pipe_cfg: PipelineConfig | None = None) 
             "aligned_state_shape": list(s5.aligned_state.shape),
         }
 
-    align_stats = _WORKER_STATE.get("align_stats")
-    align_lag = cfg.alignment_lag if cfg.alignment_lag is not None else resolve_alignment_lag(align_cfg, align_stats)
     align_meta = alignment_metadata(align_cfg, align_stats, align_lag)
 
     return EpisodeResult(
@@ -225,6 +248,12 @@ def process_episode(episode_index: int, pipe_cfg: PipelineConfig | None = None) 
             "embodiment": schema.embodiment,
             "state_dim": schema.pipeline_state_dim,
             "action_dim": schema.pipeline_action_dim,
+            "stage2_dim_names": s2.dim_names,
+            "stage2_filled_action_eef": s2.filled_action_eef,
+            "stage2_fill_lags": s2.fill_lags,
+            "stage2_episode_lag": s2.episode_lag,
+            "stage2_lag_mean": s2.lag_mean,
+            "stage2_lag_mode": s2.lag_mode,
             **s5_meta,
             **align_meta,
         },
@@ -235,57 +264,46 @@ def _worker_fn(episode_index: int) -> EpisodeResult:
     return process_episode(episode_index)
 
 
-def _write_output_episode(cfg: PipelineConfig, result: EpisodeResult) -> None:
-    src = episode_parquet_path(cfg.dataset_root, result.episode_index)
-    chunk = result.episode_index // 1000
-    dst = cfg.output_dir / "data_filtered" / f"chunk-{chunk:03d}" / f"episode_{result.episode_index:06d}.parquet"
-    table = read_episode_table(src)
-
-    align_cfg = cfg.state_action_alignment or StateActionAlignConfig()
-    align_lag = cfg.alignment_lag if cfg.alignment_lag is not None else resolve_alignment_lag(
-        align_cfg, _WORKER_STATE.get("align_stats")
-    )
-    if align_cfg.enabled and align_lag > 0 and cfg.schema.embodiment in ("humanoid", "robomind_ur"):
-        state, action = extract_state_action_from_table(table, cfg.schema)
-        if cfg.schema.embodiment == "robomind_ur":
-            aligned_action = apply_robomind_temporal_alignment(state, action, align_lag)
-        else:
-            num_dims = matched_alignment_dims(cfg.schema, state, action)
-            aligned_action = apply_state_action_temporal_alignment(state, action, align_lag, num_dims)
-        table = update_table_action_columns(table, aligned_action, cfg.schema)
-
-    write_episode_with_validity_mask(dst, table, result.step_validity_mask)
-
-    s5_cfg = cfg.stage5 or Stage5Config()
-    if not s5_cfg.enabled:
-        return
-    path = episode_parquet_path(cfg.dataset_root, result.episode_index)
-    raw_ctx = read_stage5_raw_context(path, cfg.schema, s5_cfg)
-    s5 = run_stage5(cfg.dataset_root, result.episode_index, cfg.schema, raw_ctx, s5_cfg)
-    aligned_dir = cfg.output_dir / "data_aligned" / f"chunk-{chunk:03d}"
-    aligned_dir.mkdir(parents=True, exist_ok=True)
-    mask = result.step_validity_mask if result.step_validity_mask is not None else np.ones(s5.aligned_state.shape[0], dtype=np.int8)
-    np.savez_compressed(
-        aligned_dir / f"episode_{result.episode_index:06d}.npz",
-        aligned_state=s5.aligned_state.astype(np.float32),
-        aligned_action=s5.aligned_action.astype(np.float32),
-        step_validity_mask=mask.astype(np.int8),
-        reference_frame=s5_cfg.reference_frame,
-        rotation_correction_euler_xyz=np.array(s5_cfg.rotation_correction_euler_xyz, dtype=np.float64),
-    )
-
-
 def run_pipeline(
     cfg: PipelineConfig,
     episode_indices: list[int],
     stats_episode_indices: list[int] | None = None,
     show_progress: bool = True,
+    timings: dict[str, float] | None = None,
 ) -> list[EpisodeResult]:
     from tqdm import tqdm
 
+    def _tick(name: str, t_start: float) -> float:
+        dt = time.perf_counter() - t_start
+        if timings is not None:
+            timings[name] = round(dt, 3)
+        if show_progress:
+            print(f"[timing] {name}: {dt:.2f}s ({dt / 60:.2f} min)", flush=True)
+        return time.perf_counter()
+
+    pipe_t0 = time.perf_counter()
+    ignore_set = load_ignore_episode_list(cfg.ignore_episodes_path) if cfg.ignore_episodes_path else set()
+    if ignore_set:
+        before = len(episode_indices)
+        episode_indices = filter_episode_indices(episode_indices, ignore_set)
+        ignored_manifest = {
+            "reason": "pipeline ignore list",
+            "source": str(cfg.ignore_episodes_path),
+            "ignored_count": before - len(episode_indices),
+            "episode_indices": sorted(ignore_set),
+        }
+        meta_dir = cfg.output_dir / "meta"
+        meta_dir.mkdir(parents=True, exist_ok=True)
+        with (meta_dir / "ignored_episodes.json").open("w", encoding="utf-8") as f:
+            json.dump(ignored_manifest, f, indent=2, ensure_ascii=False)
+        if show_progress:
+            print(f"Ignoring {len(ignore_set)} episodes from ignore list ({before} -> {len(episode_indices)})")
+
     stats_eps = stats_episode_indices or episode_indices
+    stats_eps = filter_episode_indices(stats_eps, ignore_set)
     cache_path = cfg.stats_cache_path or (cfg.output_dir / "cache" / "global_stats.npz")
 
+    t = time.perf_counter()
     global_stats = load_or_compute_stats(
         cfg.dataset_root,
         cache_path,
@@ -296,6 +314,7 @@ def run_pipeline(
         num_bins=cfg.stats_num_bins,
         show_progress=show_progress,
     )
+    t = _tick("p3_global_stats", t)
 
     s1_cache = cfg.stage1_stats_cache_path or (cfg.output_dir / "cache" / "stage1_global_stats.npz")
     s1_cfg = cfg.stage1 or Stage1Config()
@@ -310,6 +329,7 @@ def run_pipeline(
         num_bins=cfg.stats_num_bins,
         show_progress=show_progress,
     )
+    t = _tick("p3_stage1_stats", t)
 
     align_cfg = cfg.state_action_alignment or StateActionAlignConfig()
     align_cache = cfg.state_action_lag_cache_path or (
@@ -325,6 +345,8 @@ def run_pipeline(
         num_workers=cfg.num_workers,
         show_progress=show_progress,
     )
+    t = _tick("p3_state_action_lag_stats", t)
+    p4_plan = resolve_p4_plan(align_cfg)
     cfg.alignment_lag = resolve_alignment_lag(align_cfg, align_stats)
 
     ctx = mp.get_context("fork")
@@ -339,11 +361,45 @@ def run_pipeline(
             iterator = tqdm(iterator, total=len(episode_indices), desc="process episodes")
         for result in iterator:
             results.append(result)
-            if cfg.output_mode in ("filter", "both") and result.step_validity_mask is not None:
-                if result.step_validity_mask.size > 0:
-                    _write_output_episode(cfg, result)
 
     results.sort(key=lambda r: r.episode_index)
+    t = _tick("p3_process_episodes", t)
+
+    align_lag = resolve_alignment_lag(align_cfg, align_stats)
+    delay_meta = resolve_state_action_delay(align_cfg, align_stats, p4_plan)
+
+    if cfg.output_mode in ("filter", "both"):
+        export_summary = export_lerobot_from_results(
+            source_root=cfg.dataset_root,
+            output_root=cfg.output_dir,
+            schema=cfg.schema,
+            results=results,
+            alignment_lag=align_lag,
+            alignment_enabled=p4_plan.apply_shift,
+            recompute_video_stats=cfg.recompute_video_stats,
+            export_workers=cfg.export_workers,
+            parallel_videos=cfg.parallel_videos,
+            show_progress=show_progress,
+            alignment_plan=p4_plan.name,
+            manual_delay=p4_plan.manual_delay,
+        )
+        t = _tick("p3_lerobot_export", t)
+        if not cfg.skip_alignment_verify:
+            alignment = verify_lerobot_alignment(
+                cfg.output_dir,
+                [ep.episode_index for ep in export_summary.episodes],
+            )
+            alignment_path = cfg.output_dir / "alignment_report.json"
+            with alignment_path.open("w", encoding="utf-8") as f:
+                json.dump(alignment, f, indent=2, ensure_ascii=False)
+            t = _tick("p3_alignment_verify", t)
+        if show_progress:
+            print(
+                f"Exported {export_summary.total_episodes} episodes, "
+                f"{export_summary.total_frames} frames "
+                f"(skipped {export_summary.skipped_episodes}, truncated {export_summary.truncated_episodes}); "
+                f"P4 plan={p4_plan.name} state_action_delay={delay_meta}"
+            )
 
     if cfg.output_mode in ("report", "both"):
         report = build_quality_report(
@@ -365,21 +421,39 @@ def run_pipeline(
                 "processed_episodes": len(episode_indices),
                 "validity_mask_mode": "prefix_truncate_then_static_shorten",
                 "state_action_alignment_enabled": align_cfg.enabled,
-                "state_action_alignment_lag": resolve_alignment_lag(align_cfg, align_stats),
+                "state_action_alignment_plan": p4_plan.name,
+                "state_action_alignment_apply_delay": align_cfg.apply_delay,
+                "state_action_alignment_lag": align_lag,
+                "state_action_delay": delay_meta,
                 "stage4_max_static_steps": (cfg.stage4 or Stage4Config()).max_static_steps,
                 "stage5_enabled": (cfg.stage5 or Stage5Config()).enabled,
                 "embodiment": cfg.schema.embodiment,
+                "ignored_episodes": len(ignore_set),
+                "ignore_episodes_path": str(cfg.ignore_episodes_path) if cfg.ignore_episodes_path else None,
             },
         )
         write_quality_report(cfg.output_dir / "reports" / "quality_report.json", report)
         write_exclusion_log(cfg.output_dir / "reports" / "exclusion_log.jsonl", results)
+        write_optimal_lags(cfg.output_dir / "reports" / "optimal_lags.json", results)
+        t = _tick("p3_quality_report", t)
 
+    _tick("p3_pipeline_total", pipe_t0)
     return results
 
 
 def load_config(yaml_path: Path) -> dict:
     with yaml_path.open("r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _resolve_ignore_episodes_path(value: str | Path | None) -> Path | None:
+    if value is None:
+        return None
+    path = Path(value)
+    if path.is_absolute():
+        return path
+    repo_root = Path(__file__).resolve().parents[2]
+    return repo_root / path
 
 
 def pipeline_config_from_yaml(yaml_cfg: dict, overrides: dict | None = None) -> PipelineConfig:
@@ -394,15 +468,14 @@ def pipeline_config_from_yaml(yaml_cfg: dict, overrides: dict | None = None) -> 
     s4 = yaml_cfg.get("stage4", {})
     s5 = yaml_cfg.get("stage5", {})
     sa = yaml_cfg.get("state_action_alignment", {})
+    ta = overrides.get("temporal_align") or yaml_cfg.get("temporal_align") or {}
 
     gripper_state = tuple(s3["exempt_dims"].get("gripper_state", list(schema.gripper_indices)))
     gripper_action = tuple(s3["exempt_dims"].get("gripper_action", list(schema.gripper_indices)))
     rpy_state = tuple(s3["exempt_dims"].get("rpy_state", list(schema.rpy_indices)))
     rpy_action = tuple(s3["exempt_dims"].get("rpy_action", list(schema.rpy_indices)))
 
-    fixed_lag = sa.get("fixed_lag")
-    if fixed_lag is not None:
-        fixed_lag = int(fixed_lag)
+    align_cfg = parse_temporal_align_config(ta, sa, overrides=overrides)
 
     return PipelineConfig(
         dataset_root=dataset_root,
@@ -416,14 +489,20 @@ def pipeline_config_from_yaml(yaml_cfg: dict, overrides: dict | None = None) -> 
             overrides.get("stage1_post_zero_grace_frames", pipe.get("stage1_post_zero_grace_frames", 0))
         ),
         discard_short_prefix=bool(overrides.get("discard_short_prefix", pipe.get("discard_short_prefix", False))),
-        state_action_alignment=StateActionAlignConfig(
-            enabled=bool(overrides.get("state_action_alignment_enabled", sa.get("enabled", False))),
-            max_lag_frames=int(sa.get("max_lag_frames", 5)),
-            diff_epsilon=float(sa.get("diff_epsilon", 1e-4)),
-            min_active_samples=int(sa.get("min_active_samples", 10)),
-            fixed_lag=fixed_lag,
-            default_lag=int(sa.get("default_lag", 1)),
+        recompute_video_stats=bool(overrides.get("recompute_video_stats", pipe.get("recompute_video_stats", False))),
+        export_workers=(
+            int(overrides["export_workers"])
+            if overrides.get("export_workers") is not None
+            else (int(pipe["export_workers"]) if pipe.get("export_workers") is not None else None)
         ),
+        parallel_videos=bool(overrides.get("parallel_videos", pipe.get("parallel_videos", True))),
+        skip_alignment_verify=bool(
+            overrides.get("skip_alignment_verify", pipe.get("skip_alignment_verify", False))
+        ),
+        ignore_episodes_path=_resolve_ignore_episodes_path(
+            overrides.get("ignore_episodes_path", pipe.get("ignore_episodes_path"))
+        ),
+        state_action_alignment=align_cfg,
         state_action_lag_recompute=bool(
             overrides.get("state_action_lag_recompute", sa.get("stats", {}).get("recompute", True))
         ),
@@ -463,6 +542,12 @@ def pipeline_config_from_yaml(yaml_cfg: dict, overrides: dict | None = None) -> 
             da_per_dim=s2["thresholds"]["da_per_dim"],
             da_episode_mean=s2["thresholds"]["da_episode_mean"],
             action_type=s2["action_type"],
+            fill_missing_action_eef=bool(
+                overrides.get(
+                    "stage2_fill_missing_action_eef",
+                    s2.get("fill_missing_action_eef", True),
+                )
+            ),
         ),
         stage3=Stage3Config(
             alpha=s3["alpha"],

@@ -1,0 +1,10 @@
+{
+  "source": "robomind_ur",
+  "target": "Dataclean/standard_info.json",
+  "notes": {
+    "layout": "master/puppet multi-column → arm/gripper/eef standard fields"
+  },
+  "images": {
+    "observation.images.camera_top": "camera_front or camera_top when present"
+  }
+}

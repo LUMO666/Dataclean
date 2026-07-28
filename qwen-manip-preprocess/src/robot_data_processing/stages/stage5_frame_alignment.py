@@ -22,7 +22,7 @@ from robot_data_processing.transforms import (
 
 @dataclass
 class Stage5Config:
-    enabled: bool = True
+    enabled: bool = False  # default off: eef frame/direction is human-reviewed, not transformed in-pipeline
     reference_frame: str = "camera_top_frame0"
     rotation_correction_euler_xyz: tuple[float, float, float] = (0.0, 0.0, 0.0)
     egodex_extrinsics_column: str = "observation.camera_extrinsics_world"

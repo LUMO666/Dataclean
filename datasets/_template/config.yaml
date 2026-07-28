@@ -1,0 +1,49 @@
+dataset:
+  name: REPLACE_ME
+  root: /path/to/source_lerobot
+  embodiment: REPLACE_ME  # humanoid | egodex | robomind_ur | custom
+  fps: 30
+  layout: single_root  # single_root | part_task
+
+pipeline:
+  num_workers: 64
+  export_workers: 16
+  output_mode: both  # report | filter | both
+  force_skip_gate: false
+  parallel_videos: true
+  recompute_video_stats: false
+
+media:
+  target_height: 384
+  max_keyframe_interval: 10
+  require_camera_top: true
+
+speed_align:
+  enabled: false
+  golden_embodiment: humanoid
+  target_fps: 30
+
+# P4: default = lag stats only (no action rewrite). Set apply_delay: true to
+# align to delay=1, or mode: manual with manual_delay (+k delay / -k advance).
+temporal_align:
+  apply_delay: false
+  mode: stats
+  manual_delay: null
+
+# Stage2 DA on standard eef/arm keys. If action.eef missing/empty, fill from
+# state.eef using joint-position lag (action.eef[t]=state.eef[t+lag]).
+stage2:
+  fill_missing_action_eef: true
+
+# P2 review numeric fixes — write after approving eef_direction / gripper_closedness
+review_corrections:
+  extrinsic_rotation_correction:
+    camera_top.T_ArmLeft_CameraTop: null
+    camera_top.T_ArmRight_CameraTop: null
+  gripper_closedness_correction:
+    action: null
+    state: null
+
+# Quality stages: reuse engine YAML shape (stage1–5). Paste from an existing config
+# or point quality_config_path to a shared yaml under qwen-manip-preprocess/config/.
+quality_config_path: null

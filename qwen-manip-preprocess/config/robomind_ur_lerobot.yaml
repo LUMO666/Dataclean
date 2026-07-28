@@ -31,6 +31,9 @@ state_action_alignment:
   min_active_samples: 10
   default_lag: 1
   fixed_lag: null
+  apply_delay: false
+  mode: stats
+  manual_delay: null
   stats:
     recompute: true
     cache_path: cache/state_action_lag.npz
@@ -71,7 +74,7 @@ stage2:
     savgol_polyorder: 3
   alignment:
     max_lag_frames: 5
-    diff_epsilon: 1.0e-4
+    diff_epsilon: 1.0e-3
     min_active_samples: 10
   thresholds:
     da_per_dim: 0.65

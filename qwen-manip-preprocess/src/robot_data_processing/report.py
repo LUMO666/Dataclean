@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from robot_data_processing.types import EpisodeResult
 
@@ -13,6 +13,82 @@ def write_exclusion_log(path: Path, results: list[EpisodeResult]) -> None:
     with path.open("w", encoding="utf-8") as f:
         for r in results:
             f.write(json.dumps(r.to_dict(), ensure_ascii=False) + "\n")
+
+
+def _episode_optimal_lag_row(r: EpisodeResult) -> dict[str, Any]:
+    """One episode's Stage2 per-dim lags + unified episode lag used for DA."""
+    raw_lags = list(r.stage2_lags) if r.stage2_lags is not None else []
+    dim_names = list(r.metadata.get("stage2_dim_names") or [])
+    # Only dimensions that actually contributed a lag (active samples enough)
+    computed = [int(x) for x in raw_lags if x is not None]
+    lag_mean = r.metadata.get("stage2_lag_mean")
+    if lag_mean is None and computed:
+        lag_mean = float(sum(computed) / len(computed))
+    return {
+        "episode_index": int(r.episode_index),
+        "discard": bool(r.discard),
+        "stage2_da_mean": r.stage2_da_mean,
+        "dim_names": dim_names,
+        "lags": [None if x is None else int(x) for x in raw_lags],
+        "lag_mean": float(lag_mean) if lag_mean is not None else None,
+        "lag_mode": r.metadata.get("stage2_lag_mode"),
+        "episode_lag": r.metadata.get("stage2_episode_lag"),
+        "fill_lags": dict(r.metadata.get("stage2_fill_lags") or {}),
+        "global_alignment_lag": r.metadata.get("state_action_alignment_lag"),
+    }
+
+
+def build_optimal_lags_payload(results: list[EpisodeResult]) -> dict[str, Any]:
+    """Aggregate + per-episode optimal lags from Stage2 lag consensus."""
+    rows = [_episode_optimal_lag_row(r) for r in results]
+    all_lags = [lag for row in rows for lag in row["lags"] if lag is not None]
+    ep_lags = [row["episode_lag"] for row in rows if row.get("episode_lag") is not None]
+    ep_means = [row["lag_mean"] for row in rows if row["lag_mean"] is not None]
+
+    dim_acc: dict[str, list[int]] = {}
+    for row in rows:
+        names = row["dim_names"]
+        lags = row["lags"]
+        if len(names) != len(lags):
+            continue
+        for name, lag in zip(names, lags):
+            if lag is None:
+                continue
+            dim_acc.setdefault(str(name), []).append(int(lag))
+    per_dim_mean = {
+        name: float(sum(vs) / len(vs)) for name, vs in sorted(dim_acc.items()) if vs
+    }
+
+    hist = Counter(all_lags)
+    ep_hist = Counter(int(x) for x in ep_lags)
+    return {
+        "summary": {
+            "num_episodes": len(rows),
+            "num_lag_samples": len(all_lags),
+            "lag_mean_over_dims": float(sum(all_lags) / len(all_lags)) if all_lags else None,
+            "lag_mean_over_episodes": (
+                float(sum(ep_means) / len(ep_means)) if ep_means else None
+            ),
+            "episode_lag_mean": (
+                float(sum(ep_lags) / len(ep_lags)) if ep_lags else None
+            ),
+            "lag_min": int(min(all_lags)) if all_lags else None,
+            "lag_max": int(max(all_lags)) if all_lags else None,
+            "lag_histogram": {str(k): int(v) for k, v in sorted(hist.items())},
+            "episode_lag_histogram": {str(k): int(v) for k, v in sorted(ep_hist.items())},
+            "per_dim_lag_mean": per_dim_mean,
+        },
+        "episodes": rows,
+    }
+
+
+def write_optimal_lags(path: Path, results: list[EpisodeResult]) -> None:
+    """Write Stage2 optimal lags for all processed episodes to one JSON file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = build_optimal_lags_payload(results)
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
 
 def build_quality_report(

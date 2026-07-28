@@ -79,7 +79,12 @@ def load_or_compute_action_state_lag(
     num_workers: int,
     show_progress: bool = True,
 ) -> StateActionAlignStats | None:
-    if not cfg.enabled or schema.embodiment not in ("humanoid", "robomind_ur"):
+    from robot_data_processing.stages.state_action_temporal_alignment import resolve_p4_plan
+
+    plan = resolve_p4_plan(cfg)
+    if not cfg.enabled or not plan.compute_stats:
+        return None
+    if schema.embodiment not in ("humanoid", "robomind_ur"):
         return None
     if cache_path.exists() and not recompute:
         loaded = StateActionAlignStats.load(str(cache_path))

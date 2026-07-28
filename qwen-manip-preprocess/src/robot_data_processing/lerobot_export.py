@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import subprocess
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -12,8 +14,24 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from robot_data_processing.loader import filter_table_by_indices, keep_indices_from_table, valid_keep_length
-from robot_data_processing.schema import stack_column
+from robot_data_processing.loader import (
+    episode_parquet_path,
+    filter_table_by_indices,
+    keep_indices_from_table,
+    read_episode_table,
+    valid_keep_length,
+)
+from robot_data_processing.mask import keep_indices_from_mask
+from robot_data_processing.preprocess import (
+    apply_robomind_temporal_alignment,
+    extract_state_action_from_table,
+    update_table_action_columns,
+)
+from robot_data_processing.schema import DatasetSchema, stack_column
+from robot_data_processing.stages.state_action_temporal_alignment import (
+    apply_state_action_temporal_alignment,
+    matched_alignment_dims,
+)
 
 
 @dataclass
@@ -30,11 +48,138 @@ class ExportSummary:
     total_episodes: int
     total_frames: int
     truncated_episodes: int
+    skipped_episodes: int = 0
     episodes: list[EpisodeExportResult] = field(default_factory=list)
 
 
+@dataclass
+class LerobotExportContext:
+    source_root: Path
+    output_root: Path
+    info: dict[str, Any]
+    fps: float
+    chunks_size: int
+    video_keys: list[str]
+    src_episodes: dict[int, dict[str, Any]]
+    src_source_map: dict[int, dict[str, Any]]
+    recompute_video_stats: bool
+
+
 def _run(cmd: list[str]) -> None:
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip()
+        raise subprocess.CalledProcessError(proc.returncode, cmd, output=err)
+
+
+_ENCODER_ARGS_CACHE: list[str] | None = None
+
+
+def _ffmpeg_video_encoders() -> set[str]:
+    proc = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-encoders"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        check=False,
+    )
+    encoders: set[str] = set()
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split()
+        if len(parts) >= 2 and parts[0].startswith("V"):
+            encoders.add(parts[1])
+    return encoders
+
+
+def _probe_video_encoder(encoder: str, extra: list[str]) -> bool:
+    proc = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=0.1",
+            "-frames:v",
+            "1",
+            "-c:v",
+            encoder,
+            *extra,
+            "-f",
+            "null",
+            "-",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def _video_encoder_args() -> list[str]:
+    """Pick a video encoder for filtergraph exports (stream copy is invalid with filters)."""
+    global _ENCODER_ARGS_CACHE
+    if _ENCODER_ARGS_CACHE is not None:
+        return _ENCODER_ARGS_CACHE
+
+    available = _ffmpeg_video_encoders()
+    candidates: list[tuple[str, list[str]]] = [
+        ("libx264", ["-pix_fmt", "yuv420p", "-crf", "23"]),
+        ("h264_v4l2m2m", ["-pix_fmt", "yuv420p"]),
+        ("mpeg4", ["-pix_fmt", "yuv420p", "-qscale:v", "2"]),
+    ]
+    for encoder, extra in candidates:
+        if encoder not in available:
+            continue
+        if _probe_video_encoder(encoder, extra):
+            _ENCODER_ARGS_CACHE = ["-c:v", encoder, *extra]
+            return _ENCODER_ARGS_CACHE
+    raise RuntimeError("No usable ffmpeg video encoder found (tried libx264, h264_v4l2m2m, mpeg4)")
+
+
+def _export_video_with_trim_runs(src: Path, dst: Path, runs: list[tuple[int, int]]) -> None:
+    """Re-encode selected frame runs; required when Stage4 removes interior/static frames."""
+    if not runs:
+        raise ValueError(f"No frame runs to export for video: {src}")
+
+    parts: list[str] = []
+    concat_inputs: list[str] = []
+    for i, (start, end) in enumerate(runs):
+        parts.append(
+            f"[0:v]trim=start_frame={start}:end_frame={end},"
+            f"setpts=PTS-STARTPTS,format=yuv420p[v{i}]"
+        )
+        concat_inputs.append(f"[v{i}]")
+
+    if len(runs) == 1:
+        filter_complex = parts[0].replace("[v0]", "[out]")
+    else:
+        filter_complex = (
+            ";".join(parts)
+            + f";{''.join(concat_inputs)}concat=n={len(runs)}:v=1:a=0,format=yuv420p[out]"
+        )
+
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(src),
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[out]",
+            *_video_encoder_args(),
+            str(dst),
+        ]
+    )
 
 
 def load_info(source_root: Path) -> dict[str, Any]:
@@ -88,59 +233,13 @@ def extract_video_by_indices(src: Path, dst: Path, indices: np.ndarray, fps: flo
     indices = np.asarray(indices, dtype=np.int64)
     if indices.size == 0:
         raise ValueError(f"Cannot export empty video: {src}")
+    # Fast path: contiguous prefix [0..N) — stream copy without filters.
     if np.array_equal(indices, np.arange(indices.size)) and int(indices[0]) == 0:
         trim_video(src, dst, int(indices.size), fps)
         return
 
     runs = _contiguous_runs(indices)
-    if len(runs) == 1:
-        start, end = runs[0]
-        _run(
-            [
-                "ffmpeg",
-                "-y",
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-i",
-                str(src),
-                "-vf",
-                f"select='between(n\\,{start}\\,{end - 1})'",
-                "-vsync",
-                "vfr",
-                "-frames:v",
-                str(end - start),
-                "-c",
-                "copy",
-                str(dst),
-            ]
-        )
-        return
-
-    parts = []
-    concat_inputs = []
-    for i, (start, end) in enumerate(runs):
-        parts.append(f"[0:v]trim=start_frame={start}:end_frame={end},setpts=PTS-STARTPTS[v{i}]")
-        concat_inputs.append(f"[v{i}]")
-    filter_complex = ";".join(parts) + f";{''.join(concat_inputs)}concat=n={len(runs)}:v=1:a=0[out]"
-    _run(
-        [
-            "ffmpeg",
-            "-y",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            str(src),
-            "-filter_complex",
-            filter_complex,
-            "-map",
-            "[out]",
-            "-c",
-            "copy",
-            str(dst),
-        ]
-    )
+    _export_video_with_trim_runs(src, dst, runs)
 
 
 def _replace_column(table, name: str, values: np.ndarray):
@@ -428,141 +527,227 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
             f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
-def export_lerobot_dataset(
-    source_root: Path,
-    filtered_root: Path,
-    output_root: Path,
-    episode_indices: list[int],
+def prepare_episode_table_for_export(
+    dataset_root: Path,
+    episode_index: int,
+    schema: DatasetSchema,
     *,
-    num_workers: int = 8,
+    alignment_enabled: bool,
+    alignment_lag: int,
+    alignment_plan: str = "apply_stats",
+    manual_delay: int | None = None,
+):
+    table = read_episode_table(episode_parquet_path(dataset_root, episode_index))
+    if not alignment_enabled or schema.embodiment not in ("humanoid", "robomind_ur"):
+        return table
+    state, action = extract_state_action_from_table(table, schema)
+    if alignment_plan == "manual":
+        if manual_delay is None:
+            raise ValueError("manual alignment_plan requires manual_delay")
+        from robot_data_processing.stages.state_action_temporal_alignment import (
+            apply_manual_action_delay,
+        )
+
+        aligned_action = apply_manual_action_delay(action, int(manual_delay))
+    elif schema.embodiment == "robomind_ur":
+        aligned_action = apply_robomind_temporal_alignment(state, action, alignment_lag)
+    else:
+        num_dims = matched_alignment_dims(schema, state, action)
+        aligned_action = apply_state_action_temporal_alignment(
+            state, action, alignment_lag, num_dims
+        )
+    return update_table_action_columns(table, aligned_action, schema)
+
+
+def create_export_context(
+    source_root: Path,
+    output_root: Path,
+    *,
     recompute_video_stats: bool = True,
-) -> ExportSummary:
+) -> LerobotExportContext:
     source_root = Path(source_root)
-    filtered_root = Path(filtered_root)
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
-
     info = load_info(source_root)
-    fps = float(info.get("fps", 30))
-    chunks_size = int(info.get("chunks_size", 1000))
-    video_keys = video_keys_from_info(info)
-
-    src_episodes = {row["episode_index"]: row for row in _load_jsonl(source_root / "meta" / "episodes.jsonl")}
-    src_source_map = {
-        row["merged_episode_index"]: row for row in _load_jsonl(source_root / "meta" / "episode_source_map.jsonl")
-    }
-
     meta_out = output_root / "meta"
     meta_out.mkdir(parents=True, exist_ok=True)
-
-    for name in ("tasks.jsonl", "modality.json", "dreamzero_metadata.json", "dreamzero_ee_metadata.json", "dreamzero_ee_stats.json"):
+    for name in (
+        "tasks.jsonl",
+        "modality.json",
+        "dreamzero_metadata.json",
+        "dreamzero_ee_metadata.json",
+        "dreamzero_ee_stats.json",
+    ):
         src = source_root / "meta" / name
         if src.exists():
             shutil.copy2(src, meta_out / name)
+    return LerobotExportContext(
+        source_root=source_root,
+        output_root=output_root,
+        info=info,
+        fps=float(info.get("fps", 30)),
+        chunks_size=int(info.get("chunks_size", 1000)),
+        video_keys=video_keys_from_info(info),
+        src_episodes={row["episode_index"]: row for row in _load_jsonl(source_root / "meta" / "episodes.jsonl")},
+        src_source_map={
+            row["merged_episode_index"]: row
+            for row in _load_jsonl(source_root / "meta" / "episode_source_map.jsonl")
+        },
+        recompute_video_stats=recompute_video_stats,
+    )
 
-    episodes_out: list[dict[str, Any]] = []
-    episodes_stats_out: list[dict[str, Any]] = []
-    source_map_out: list[dict[str, Any]] = []
-    export_results: list[EpisodeExportResult] = []
 
-    global_index = 0
-    total_frames = 0
-    truncated_count = 0
+def _export_episode_videos(
+    ctx: LerobotExportContext,
+    *,
+    episode_index: int,
+    chunk: int,
+    keep_indices: np.ndarray,
+    parallel_videos: bool,
+) -> dict[str, Path]:
+    out_videos: dict[str, Path] = {}
 
-    for episode_index in episode_indices:
-        filtered_path = filtered_root / "data_filtered" / f"chunk-{episode_index // 1000:03d}" / f"episode_{episode_index:06d}.parquet"
-        if not filtered_path.exists():
-            raise FileNotFoundError(f"Missing filtered parquet: {filtered_path}")
+    def _one(vk: str) -> tuple[str, Path]:
+        src_vid = video_path(ctx.source_root, episode_index, vk)
+        dst_vid = ctx.output_root / "videos" / f"chunk-{chunk:03d}" / vk / f"episode_{episode_index:06d}.mp4"
+        if not src_vid.exists():
+            raise FileNotFoundError(f"Missing source video: {src_vid}")
+        extract_video_by_indices(src_vid, dst_vid, keep_indices, ctx.fps)
+        return vk, dst_vid
 
-        table = pq.read_table(filtered_path)
-        original_length = table.num_rows
-        keep_indices = keep_indices_from_table(table)
-        keep_len = int(keep_indices.size)
-        truncated = keep_len < original_length
-        if truncated:
-            truncated_count += 1
+    if parallel_videos and len(ctx.video_keys) > 1:
+        with ThreadPoolExecutor(max_workers=len(ctx.video_keys)) as pool:
+            futures = [pool.submit(_one, vk) for vk in ctx.video_keys]
+            for fut in futures:
+                vk, dst = fut.result()
+                out_videos[vk] = dst
+    else:
+        for vk in ctx.video_keys:
+            vk, dst = _one(vk)
+            out_videos[vk] = dst
+    return out_videos
 
-        out_parquet = output_root / "data" / f"chunk-{episode_index // 1000:03d}" / f"episode_{episode_index:06d}.parquet"
-        out_parquet.parent.mkdir(parents=True, exist_ok=True)
-        sliced = filter_parquet_table(table, keep_indices, episode_index, global_index, fps)
-        pq.write_table(sliced, out_parquet, compression="snappy")
 
-        out_videos: dict[str, Path] = {}
-        for vk in video_keys:
-            src_vid = video_path(source_root, episode_index, vk)
-            dst_vid = output_root / "videos" / f"chunk-{episode_index // 1000:03d}" / vk / f"episode_{episode_index:06d}.mp4"
-            if not src_vid.exists():
-                raise FileNotFoundError(f"Missing source video: {src_vid}")
-            extract_video_by_indices(src_vid, dst_vid, keep_indices, fps)
-            out_videos[vk] = dst_vid
+def export_single_episode(
+    ctx: LerobotExportContext,
+    *,
+    dataset_root: Path,
+    schema: DatasetSchema,
+    episode_index: int,
+    step_validity_mask: np.ndarray,
+    global_index: int,
+    alignment_enabled: bool,
+    alignment_lag: int,
+    parallel_videos: bool = True,
+    alignment_plan: str = "apply_stats",
+    manual_delay: int | None = None,
+) -> tuple[int, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, EpisodeExportResult | None]:
+    keep_indices = keep_indices_from_mask(step_validity_mask)
+    if keep_indices.size == 0:
+        return global_index, None, None, None, None
 
-        src_params = parameters_path(source_root, episode_index)
-        if src_params.exists():
-            dst_params = output_root / "parameters" / f"chunk-{episode_index // 1000:03d}" / f"episode_{episode_index:06d}"
-            if dst_params.exists():
-                shutil.rmtree(dst_params)
-            shutil.copytree(src_params, dst_params)
+    table = prepare_episode_table_for_export(
+        dataset_root,
+        episode_index,
+        schema,
+        alignment_enabled=alignment_enabled,
+        alignment_lag=alignment_lag,
+        alignment_plan=alignment_plan,
+        manual_delay=manual_delay,
+    )
+    original_length = table.num_rows
+    keep_len = int(keep_indices.size)
+    truncated = keep_len < original_length
 
-        src_ep = src_episodes.get(episode_index, {"episode_index": episode_index, "tasks": [], "length": original_length})
-        episodes_out.append(
-            {
-                "episode_index": episode_index,
-                "tasks": src_ep.get("tasks", []),
-                "length": keep_len,
+    chunk = episode_index // 1000
+    out_parquet = ctx.output_root / "data" / f"chunk-{chunk:03d}" / f"episode_{episode_index:06d}.parquet"
+    out_parquet.parent.mkdir(parents=True, exist_ok=True)
+    sliced = filter_parquet_table(table, keep_indices, episode_index, global_index, ctx.fps)
+    pq.write_table(sliced, out_parquet, compression="snappy")
+
+    out_videos = _export_episode_videos(
+        ctx,
+        episode_index=episode_index,
+        chunk=chunk,
+        keep_indices=keep_indices,
+        parallel_videos=parallel_videos,
+    )
+
+    src_params = parameters_path(ctx.source_root, episode_index)
+    if src_params.exists():
+        dst_params = ctx.output_root / "parameters" / f"chunk-{chunk:03d}" / f"episode_{episode_index:06d}"
+        if dst_params.exists():
+            shutil.rmtree(dst_params)
+        shutil.copytree(src_params, dst_params)
+
+    src_ep = ctx.src_episodes.get(
+        episode_index,
+        {"episode_index": episode_index, "tasks": [], "length": original_length},
+    )
+    episode_row = {
+        "episode_index": episode_index,
+        "tasks": src_ep.get("tasks", []),
+        "length": keep_len,
+    }
+    ep_stats = compute_episode_stats(sliced, out_videos if ctx.recompute_video_stats else {})
+    stats_row = {"episode_index": episode_index, "stats": ep_stats}
+
+    src_map = ctx.src_source_map.get(episode_index, {})
+    source_map_row = {
+        "merged_episode_index": episode_index,
+        "merged_global_index_start": global_index,
+        "merged_global_index_end": global_index + keep_len - 1,
+        "merged_num_frames": keep_len,
+        "source_repo_rel": src_map.get("source_repo_rel"),
+        "source_episode_index": src_map.get("source_episode_index"),
+        "source_parquet_rel": src_map.get("source_parquet_rel"),
+        "merged_parquet_rel": f"data/chunk-{chunk:03d}/episode_{episode_index:06d}.parquet",
+        "videos": {
+            vk: {
+                "src": src_map.get("videos", {}).get(vk, {}).get("src"),
+                "dst": f"videos/chunk-{chunk:03d}/{vk}/episode_{episode_index:06d}.mp4",
             }
-        )
+            for vk in ctx.video_keys
+        },
+        "parameters_copied": src_params.exists(),
+        "parameters_dst_rel": f"parameters/chunk-{chunk:03d}/episode_{episode_index:06d}",
+    }
 
-        ep_stats = compute_episode_stats(sliced, out_videos if recompute_video_stats else {})
-        episodes_stats_out.append({"episode_index": episode_index, "stats": ep_stats})
+    export_result = EpisodeExportResult(
+        episode_index=episode_index,
+        original_length=original_length,
+        exported_length=keep_len,
+        truncated=truncated,
+        video_keys=ctx.video_keys,
+    )
+    return global_index + keep_len, episode_row, stats_row, source_map_row, export_result
 
-        src_map = src_source_map.get(episode_index, {})
-        source_map_out.append(
-            {
-                "merged_episode_index": episode_index,
-                "merged_global_index_start": global_index,
-                "merged_global_index_end": global_index + keep_len - 1 if keep_len else global_index - 1,
-                "merged_num_frames": keep_len,
-                "source_repo_rel": src_map.get("source_repo_rel"),
-                "source_episode_index": src_map.get("source_episode_index"),
-                "source_parquet_rel": src_map.get("source_parquet_rel"),
-                "merged_parquet_rel": f"data/chunk-{episode_index // 1000:03d}/episode_{episode_index:06d}.parquet",
-                "videos": {
-                    vk: {
-                        "src": src_map.get("videos", {}).get(vk, {}).get("src"),
-                        "dst": f"videos/chunk-{episode_index // 1000:03d}/{vk}/episode_{episode_index:06d}.mp4",
-                    }
-                    for vk in video_keys
-                },
-                "parameters_copied": src_params.exists(),
-                "parameters_dst_rel": f"parameters/chunk-{episode_index // 1000:03d}/episode_{episode_index:06d}",
-            }
-        )
 
-        export_results.append(
-            EpisodeExportResult(
-                episode_index=episode_index,
-                original_length=original_length,
-                exported_length=keep_len,
-                truncated=truncated,
-                video_keys=video_keys,
-            )
-        )
-
-        global_index += keep_len
-        total_frames += keep_len
-
+def finalize_lerobot_export(
+    ctx: LerobotExportContext,
+    episodes_out: list[dict[str, Any]],
+    episodes_stats_out: list[dict[str, Any]],
+    source_map_out: list[dict[str, Any]],
+    export_results: list[EpisodeExportResult],
+    *,
+    skipped_episodes: int = 0,
+) -> ExportSummary:
+    meta_out = ctx.output_root / "meta"
     _write_jsonl(meta_out / "episodes.jsonl", episodes_out)
     _write_jsonl(meta_out / "episodes_stats.jsonl", episodes_stats_out)
     _write_jsonl(meta_out / "episode_source_map.jsonl", source_map_out)
 
-    out_info = json.loads(json.dumps(info))
-    num_eps = len(episode_indices)
+    total_frames = sum(row["length"] for row in episodes_out)
+    truncated_count = sum(1 for ep in export_results if ep.truncated)
+    num_eps = len(episodes_out)
+
+    out_info = json.loads(json.dumps(ctx.info))
     out_info.update(
         {
             "total_episodes": num_eps,
             "total_frames": total_frames,
-            "total_videos": num_eps * len(video_keys),
-            "total_chunks": max(1, math.ceil(num_eps / chunks_size)),
+            "total_videos": num_eps * len(ctx.video_keys),
+            "total_chunks": max(1, math.ceil(num_eps / ctx.chunks_size)),
             "splits": {"train": f"0:{num_eps}"},
         }
     )
@@ -580,17 +765,18 @@ def export_lerobot_dataset(
         total_episodes=num_eps,
         total_frames=total_frames,
         truncated_episodes=truncated_count,
+        skipped_episodes=skipped_episodes,
         episodes=export_results,
     )
-    with (output_root / "export_report.json").open("w", encoding="utf-8") as f:
+    with (ctx.output_root / "export_report.json").open("w", encoding="utf-8") as f:
         json.dump(
             {
-                "source_root": str(source_root),
-                "filtered_root": str(filtered_root),
-                "output_root": str(output_root),
+                "source_root": str(ctx.source_root),
+                "output_root": str(ctx.output_root),
                 "total_episodes": summary.total_episodes,
                 "total_frames": summary.total_frames,
                 "truncated_episodes": summary.truncated_episodes,
+                "skipped_episodes": summary.skipped_episodes,
                 "episodes": [ep.__dict__ for ep in summary.episodes],
             },
             f,
@@ -598,6 +784,218 @@ def export_lerobot_dataset(
             ensure_ascii=False,
         )
     return summary
+
+
+_EXPORT_POOL_STATE: dict[str, Any] = {}
+
+
+def _init_export_pool(state: dict[str, Any]) -> None:
+    global _EXPORT_POOL_STATE
+    _EXPORT_POOL_STATE = state
+
+
+def _export_worker(task: tuple[int, np.ndarray]) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    EpisodeExportResult | None,
+]:
+    episode_index, mask = task
+    ctx: LerobotExportContext = _EXPORT_POOL_STATE["ctx"]
+    _, episode_row, stats_row, source_map_row, export_result = export_single_episode(
+        ctx,
+        dataset_root=_EXPORT_POOL_STATE["dataset_root"],
+        schema=_EXPORT_POOL_STATE["schema"],
+        episode_index=episode_index,
+        step_validity_mask=mask,
+        global_index=0,
+        alignment_enabled=_EXPORT_POOL_STATE["alignment_enabled"],
+        alignment_lag=_EXPORT_POOL_STATE["alignment_lag"],
+        parallel_videos=_EXPORT_POOL_STATE.get("parallel_videos", True),
+        alignment_plan=_EXPORT_POOL_STATE.get("alignment_plan", "apply_stats"),
+        manual_delay=_EXPORT_POOL_STATE.get("manual_delay"),
+    )
+    return episode_row, stats_row, source_map_row, export_result
+
+
+def _assign_global_indices(
+    output_root: Path,
+    episodes_out: list[dict[str, Any]],
+    source_map_out: list[dict[str, Any]],
+) -> None:
+    episodes_out.sort(key=lambda row: row["episode_index"])
+    source_map_out.sort(key=lambda row: row["merged_episode_index"])
+    global_index = 0
+    for ep_row, sm_row in zip(episodes_out, source_map_out):
+        if ep_row["episode_index"] != sm_row["merged_episode_index"]:
+            raise ValueError(
+                f"Episode index mismatch: {ep_row['episode_index']} vs {sm_row['merged_episode_index']}"
+            )
+        length = int(ep_row["length"])
+        sm_row["merged_global_index_start"] = global_index
+        sm_row["merged_global_index_end"] = global_index + length - 1
+        sm_row["merged_num_frames"] = length
+
+        ep_idx = int(ep_row["episode_index"])
+        parquet_path = (
+            output_root / "data" / f"chunk-{ep_idx // 1000:03d}" / f"episode_{ep_idx:06d}.parquet"
+        )
+        table = pq.read_table(parquet_path)
+        table = _replace_column(
+            table,
+            "index",
+            np.arange(global_index, global_index + length, dtype=np.int64),
+        )
+        pq.write_table(table, parquet_path, compression="snappy")
+        global_index += length
+
+
+def _default_export_workers(requested: int | None) -> int:
+    if requested is not None and requested > 0:
+        return requested
+    return min(16, os.cpu_count() or 4)
+
+
+def export_lerobot_from_results(
+    *,
+    source_root: Path,
+    output_root: Path,
+    schema: DatasetSchema,
+    results: list[Any],
+    alignment_lag: int = 0,
+    alignment_enabled: bool = False,
+    recompute_video_stats: bool = False,
+    export_workers: int | None = None,
+    parallel_videos: bool = True,
+    show_progress: bool = True,
+    alignment_plan: str = "apply_stats",
+    manual_delay: int | None = None,
+) -> ExportSummary:
+    from tqdm import tqdm
+
+    workers = _default_export_workers(export_workers)
+    ctx = create_export_context(source_root, output_root, recompute_video_stats=recompute_video_stats)
+    episodes_out: list[dict[str, Any]] = []
+    episodes_stats_out: list[dict[str, Any]] = []
+    source_map_out: list[dict[str, Any]] = []
+    export_results: list[EpisodeExportResult] = []
+    skipped = 0
+
+    ordered = sorted(results, key=lambda r: r.episode_index)
+    tasks: list[tuple[int, np.ndarray]] = []
+    for result in ordered:
+        if result.step_validity_mask is None or result.step_validity_mask.size == 0:
+            skipped += 1
+            continue
+        if int(result.step_validity_mask.sum()) == 0:
+            skipped += 1
+            continue
+        tasks.append((result.episode_index, result.step_validity_mask))
+
+    if workers <= 1:
+        global_index = 0
+        iterator = tasks
+        if show_progress:
+            iterator = tqdm(tasks, desc="export lerobot")
+        for episode_index, mask in iterator:
+            global_index, episode_row, stats_row, source_map_row, export_result = export_single_episode(
+                ctx,
+                dataset_root=source_root,
+                schema=schema,
+                episode_index=episode_index,
+                step_validity_mask=mask,
+                global_index=global_index,
+                alignment_enabled=alignment_enabled,
+                alignment_lag=alignment_lag,
+                parallel_videos=parallel_videos,
+                alignment_plan=alignment_plan,
+                manual_delay=manual_delay,
+            )
+            if export_result is None:
+                skipped += 1
+                continue
+            episodes_out.append(episode_row)
+            episodes_stats_out.append(stats_row)
+            source_map_out.append(source_map_row)
+            export_results.append(export_result)
+    else:
+        pool_state = {
+            "ctx": ctx,
+            "dataset_root": source_root,
+            "schema": schema,
+            "alignment_enabled": alignment_enabled,
+            "alignment_lag": alignment_lag,
+            "parallel_videos": parallel_videos,
+            "alignment_plan": alignment_plan,
+            "manual_delay": manual_delay,
+        }
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            initializer=_init_export_pool,
+            initargs=(pool_state,),
+        ) as pool:
+            futures = {pool.submit(_export_worker, task): task[0] for task in tasks}
+            iterator = as_completed(futures)
+            if show_progress:
+                iterator = tqdm(iterator, total=len(futures), desc=f"export lerobot ({workers}w)")
+            for fut in iterator:
+                episode_row, stats_row, source_map_row, export_result = fut.result()
+                if export_result is None:
+                    skipped += 1
+                    continue
+                episodes_out.append(episode_row)
+                episodes_stats_out.append(stats_row)
+                source_map_out.append(source_map_row)
+                export_results.append(export_result)
+        _assign_global_indices(output_root, episodes_out, source_map_out)
+        export_results.sort(key=lambda ep: ep.episode_index)
+
+    return finalize_lerobot_export(
+        ctx,
+        episodes_out,
+        episodes_stats_out,
+        source_map_out,
+        export_results,
+        skipped_episodes=skipped,
+    )
+
+
+def export_lerobot_dataset(
+    source_root: Path,
+    output_root: Path,
+    episode_indices: list[int],
+    *,
+    results: list[Any],
+    schema: DatasetSchema,
+    alignment_lag: int = 0,
+    alignment_enabled: bool = False,
+    recompute_video_stats: bool = False,
+    export_workers: int | None = None,
+    parallel_videos: bool = True,
+    show_progress: bool = True,
+    alignment_plan: str = "apply_stats",
+    manual_delay: int | None = None,
+) -> ExportSummary:
+    """Export LeRobot dataset from pipeline EpisodeResult list (mask applied in-memory, no intermediate parquet)."""
+    result_by_ep = {r.episode_index: r for r in results}
+    missing = [ep for ep in episode_indices if ep not in result_by_ep]
+    if missing:
+        raise ValueError(f"Missing EpisodeResult for indices: {missing[:5]}{'...' if len(missing) > 5 else ''}")
+    ordered_results = [result_by_ep[ep] for ep in episode_indices if ep in result_by_ep]
+    return export_lerobot_from_results(
+        source_root=source_root,
+        output_root=output_root,
+        schema=schema,
+        results=ordered_results,
+        alignment_lag=alignment_lag,
+        alignment_enabled=alignment_enabled,
+        recompute_video_stats=recompute_video_stats,
+        export_workers=export_workers,
+        parallel_videos=parallel_videos,
+        show_progress=show_progress,
+        alignment_plan=alignment_plan,
+        manual_delay=manual_delay,
+    )
 
 
 @dataclass

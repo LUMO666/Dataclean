@@ -16,6 +16,10 @@ venv/
 convert/output/
 qwen-manip-preprocess/output/
 
+# humanoid_merged local review / smoke outputs
+datasets/humanoid_merged/manual_review/results/
+datasets/humanoid_merged/test*/
+
 # Local caches & logs
 *.log
 .DS_Store

@@ -1,0 +1,23 @@
+# Manual review gate (P2). Status: pending | approved | blocked
+dataset: egodex_lerobot_v21
+updated_at: null
+reviewer: null
+
+items:
+  eef_direction:
+    status: pending
+    notes: >-
+      FIRST: confirm camera-frame eef / +Z forward AND ArmLeft/Right↔CameraTop extrinsics.
+      Correction: config.yaml review_corrections.extrinsic_rotation_correction keys
+      camera_top.T_ArmLeft_CameraTop / T_ArmRight_CameraTop (T'=R@T). Stage5 OFF.
+  gripper_closedness:
+    status: pending
+    notes: >-
+      Gripper width → closedness polarity (0=open, 1=closed).
+      Correction: config.yaml review_corrections.gripper_closedness_correction.action / .state {scale,offset}.
+  camera_naming:
+    status: pending
+    notes: "camera_top required"
+  fps_stable:
+    status: pending
+    notes: "30fps"

@@ -1,0 +1,51 @@
+dataset:
+  name: humanoid_merged
+  root: /mnt/project_rlinf_hs/dreamzero_pretrain_data/humanoid_merged
+  embodiment: humanoid
+  fps: 30
+  layout: single_root
+  total_episodes: 46475
+
+pipeline:
+  num_workers: 64
+  export_workers: 64
+  output_mode: both
+  force_skip_gate: false
+  parallel_videos: true
+  recompute_video_stats: false
+
+media:
+  target_height: 384  # scale height to 384, width keeps AR (even)
+  max_keyframe_interval: 10  # ffmpeg -g / -keyint_min
+  require_camera_top: true
+
+speed_align:
+  enabled: true
+  golden_embodiment: humanoid
+  golden_speed_mps: 0.08
+  target_fps: 30
+
+# P4 TemporalAlign — read by orchestrator / pipeline
+#   mode: stats (default) | manual
+#   apply_delay: false → only lag stats; state_action_delay = lag_mean
+#   apply_delay: true  → shift action to delay=1; state_action_delay = 1
+#   mode: manual + manual_delay: +k delays action by k; -k advances by |k|
+temporal_align:
+  apply_delay: false
+  mode: stats
+  manual_delay: null
+
+# Stage2: DA on standard eef/arm keys; fill action.eef from state.eef when missing
+stage2:
+  fill_missing_action_eef: true
+
+# P2 review numeric fixes (after eef_direction / gripper_closedness checklist)
+review_corrections:
+  extrinsic_rotation_correction:
+    camera_top.T_ArmLeft_CameraTop: null
+    camera_top.T_ArmRight_CameraTop: null
+  gripper_closedness_correction:
+    action: {scale: -9.43, offset: 1.0}
+    state: {scale: -10, offset: 1.0}
+
+quality_config_path: qwen-manip-preprocess/config/humanoid_merged.yaml

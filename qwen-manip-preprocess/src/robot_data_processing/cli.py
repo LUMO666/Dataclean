@@ -18,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
         "--output-mode",
         choices=["report", "filter", "both"],
         default=None,
-        help="report: quality report only; filter: write filtered parquet; both",
+        help="report: quality report only; filter: export LeRobot dataset; both: report + export",
     )
     parser.add_argument("--num-workers", type=int, default=None)
     parser.add_argument("--episode-limit", type=int, default=None, help="Process first N episodes by index")
@@ -106,7 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Kept frames: {kept_frames}/{total_frames} ({100 * kept_frames / max(total_frames, 1):.2f}%)")
     print(f"Report: {cfg.output_dir / 'reports' / 'quality_report.json'}")
     if cfg.output_mode in ("filter", "both"):
-        print(f"Filtered data: {cfg.output_dir / 'data_filtered'}")
+        print(f"LeRobot export: {cfg.output_dir}")
+        print(f"  data/: {cfg.output_dir / 'data'}")
+        print(f"  videos/: {cfg.output_dir / 'videos'}")
+        print(f"  meta/: {cfg.output_dir / 'meta'}")
     return 0
 
 

@@ -1,0 +1,25 @@
+# Manual review gate (P2). Status: pending | approved | blocked
+dataset: humanoid_merged
+updated_at: null
+reviewer: null
+
+items:
+  eef_direction:
+    status: approved
+    notes: >-
+      FIRST: confirm eef frame / +Z forward AND extrinsic motion for
+      camera_top.T_ArmLeft_CameraTop / T_ArmRight_CameraTop.
+      If needed, set that key under config.yaml review_corrections.extrinsic_rotation_correction
+      (3x3/4x4 R; T'=R@T). Other extrinsics untouched. Stage5 OFF by default.
+  gripper_closedness:
+    status: approved
+    notes: >-
+      Confirm 0=open, 1=closed for effector.position.
+      If wrong, set config.yaml review_corrections.gripper_closedness_correction.action / .state
+      {scale, offset} (c'=a*c+b; pipeline clips to [0,1] by default).
+  camera_naming:
+    status: approved
+    notes: "camera_top / wrist_left / wrist_right present"
+  fps_stable:
+    status: approved
+    notes: "30fps timestamp stability"

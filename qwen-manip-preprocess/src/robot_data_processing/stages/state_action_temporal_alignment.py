@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from scipy.signal import correlate
@@ -11,12 +12,37 @@ from robot_data_processing.transforms import robomind_ur_compact_teleop
 
 @dataclass
 class StateActionAlignConfig:
+    """P4 temporal-align config.
+
+    Modes (see ``resolve_p4_plan``):
+      - ``stats`` + ``apply_delay=False`` (default): compute lag stats only; do not
+        rewrite action; ``state_action_delay`` = statistical ``lag_mean``.
+      - ``stats`` + ``apply_delay=True``: compute lag, shift action to target delay=1;
+        ``state_action_delay`` = 1.
+      - ``manual``: skip lag stats; shift action by user convention
+        (+k = delay action k steps, -k = advance action k steps);
+        ``state_action_delay`` = the given ``manual_delay``.
+    """
+
     enabled: bool = True
+    apply_delay: bool = False
+    mode: str = "stats"  # "stats" | "manual"
+    manual_delay: int | None = None
     max_lag_frames: int = 5
     diff_epsilon: float = 1e-4
     min_active_samples: int = 10
     fixed_lag: int | None = None
     default_lag: int = 1
+
+
+@dataclass
+class P4Plan:
+    """Resolved P4 behavior."""
+
+    name: str  # "stats_only" | "apply_stats" | "manual"
+    compute_stats: bool
+    apply_shift: bool
+    manual_delay: int | None = None
 
 
 @dataclass
@@ -53,6 +79,93 @@ class StateActionAlignStats:
             per_dim_lag_max=data["per_dim_lag_max"],
             num_episodes=int(data["num_episodes"][0]),
         )
+
+
+def resolve_p4_plan(cfg: StateActionAlignConfig) -> P4Plan:
+    mode = str(cfg.mode or "stats").strip().lower()
+    if mode == "manual":
+        if cfg.manual_delay is None:
+            raise ValueError(
+                "temporal_align.mode=manual requires temporal_align.manual_delay "
+                "(+k delays action by k steps; -k advances action by k steps)"
+            )
+        return P4Plan(
+            name="manual",
+            compute_stats=False,
+            apply_shift=True,
+            manual_delay=int(cfg.manual_delay),
+        )
+    if mode not in ("stats", "statistical", "auto"):
+        raise ValueError(f"Unknown temporal_align.mode={cfg.mode!r}; use 'stats' or 'manual'")
+    if cfg.apply_delay:
+        return P4Plan(name="apply_stats", compute_stats=True, apply_shift=True)
+    return P4Plan(name="stats_only", compute_stats=True, apply_shift=False)
+
+
+def resolve_state_action_delay(
+    cfg: StateActionAlignConfig,
+    stats: StateActionAlignStats | None,
+    plan: P4Plan | None = None,
+) -> int:
+    """Value written to ``meta.info.state_action_delay``."""
+    plan = plan or resolve_p4_plan(cfg)
+    if plan.name == "manual":
+        return int(plan.manual_delay)  # type: ignore[arg-type]
+    if plan.name == "apply_stats":
+        return 1
+    # stats_only: report measured lag (or default if stats unavailable)
+    if stats is not None:
+        return int(stats.lag_mean)
+    if cfg.fixed_lag is not None:
+        return max(0, int(cfg.fixed_lag))
+    return int(cfg.default_lag)
+
+
+def parse_temporal_align_config(
+    dataset_ta: dict[str, Any] | None = None,
+    quality_sa: dict[str, Any] | None = None,
+    *,
+    overrides: dict[str, Any] | None = None,
+) -> StateActionAlignConfig:
+    """Merge dataset ``temporal_align`` over quality ``state_action_alignment``.
+
+    Dataset keys win for ``apply_delay`` / ``mode`` / ``manual_delay``.
+    """
+    sa = dict(quality_sa or {})
+    ta = dict(dataset_ta or {})
+    ov = dict(overrides or {})
+
+    def _get(key: str, default: Any = None) -> Any:
+        if key in ov and ov[key] is not None:
+            return ov[key]
+        if key in ta and ta[key] is not None:
+            return ta[key]
+        if key in sa and sa[key] is not None:
+            return sa[key]
+        return default
+
+    fixed_lag = _get("fixed_lag", None)
+    if fixed_lag is not None:
+        fixed_lag = int(fixed_lag)
+    manual_delay = _get("manual_delay", None)
+    if manual_delay is not None:
+        manual_delay = int(manual_delay)
+
+    enabled = _get("enabled", True)
+    if "state_action_alignment_enabled" in ov:
+        enabled = bool(ov["state_action_alignment_enabled"])
+
+    return StateActionAlignConfig(
+        enabled=bool(enabled),
+        apply_delay=bool(_get("apply_delay", False)),
+        mode=str(_get("mode", "stats")),
+        manual_delay=manual_delay,
+        max_lag_frames=int(_get("max_lag_frames", 5)),
+        diff_epsilon=float(_get("diff_epsilon", 1e-4)),
+        min_active_samples=int(_get("min_active_samples", 10)),
+        fixed_lag=fixed_lag,
+        default_lag=int(_get("default_lag", 1)),
+    )
 
 
 def compute_peak_lag_1d(
@@ -99,21 +212,158 @@ def compute_episode_lags(
     return lags
 
 
+def temporal_shift_rows(x: np.ndarray, shift: int) -> np.ndarray:
+    """Shift rows so out[t] = x[t + shift], with edge padding.
+
+    shift > 0: use future values (advance signal content toward earlier indices).
+    shift < 0: use past values (delay the signal).
+    """
+    out = np.asarray(x, dtype=np.float64).copy()
+    if shift == 0 or out.shape[0] == 0:
+        return out
+    t = out.shape[0]
+    if shift > 0:
+        if shift >= t:
+            out[:] = x[-1]
+            return out
+        out[: t - shift] = x[shift:]
+        out[t - shift :] = x[-1]
+    else:
+        s = -shift
+        if s >= t:
+            out[:] = x[0]
+            return out
+        out[s:] = x[: t - s]
+        out[:s] = x[0]
+    return out
+
+
+def apply_manual_action_delay(action: np.ndarray, delay_k: int) -> np.ndarray:
+    """Apply user-convention delay: +k delays action by k; -k advances by |k|.
+
+    Implemented as ``temporal_shift_rows(action, -delay_k)``.
+    """
+    arr = np.asarray(action)
+    if arr.ndim == 1:
+        return temporal_shift_rows(arr, -int(delay_k)).astype(arr.dtype, copy=False)
+    out = arr.copy()
+    for d in range(out.shape[1]):
+        out[:, d] = temporal_shift_rows(out[:, d], -int(delay_k))
+    return out.astype(arr.dtype, copy=False)
+
+
+def apply_p4_to_action_fields(
+    fields: dict[str, np.ndarray],
+    plan: P4Plan,
+    *,
+    lag: int = 0,
+    target_delay: int = 1,
+) -> dict[str, np.ndarray]:
+    """Temporally shift all ``action.*`` fields according to P4 plan."""
+    if not plan.apply_shift:
+        return fields
+    if plan.name == "manual":
+        row_shift = -int(plan.manual_delay)  # type: ignore[arg-type]
+    else:
+        # apply_stats: same as target_delay - lag
+        row_shift = int(target_delay) - int(lag)
+    if row_shift == 0:
+        return fields
+    out = dict(fields)
+    for name, arr in fields.items():
+        if not name.startswith("action."):
+            continue
+        a = np.asarray(arr)
+        if a.ndim == 1:
+            out[name] = temporal_shift_rows(a, row_shift).astype(a.dtype, copy=False)
+        elif a.ndim >= 2:
+            shifted = a.copy()
+            # shift along time axis 0 for each trailing column
+            flat = shifted.reshape(shifted.shape[0], -1)
+            for d in range(flat.shape[1]):
+                flat[:, d] = temporal_shift_rows(flat[:, d], row_shift)
+            out[name] = flat.reshape(shifted.shape).astype(a.dtype, copy=False)
+        else:
+            out[name] = a
+    return out
+
+
+def fill_action_from_state(
+    state: np.ndarray,
+    action: np.ndarray,
+    dims: list[int] | np.ndarray,
+    *,
+    target_delay: int = 1,
+) -> np.ndarray:
+    """Fill missing action dims from state so action[t] ≈ state[t + target_delay]."""
+    aligned = action.copy()
+    delay = max(0, int(target_delay))
+    t = state.shape[0]
+    if t == 0:
+        return aligned
+    for d in dims:
+        d = int(d)
+        if d >= aligned.shape[1] or d >= state.shape[1]:
+            continue
+        if delay <= 0:
+            aligned[:, d] = state[:, d]
+        elif delay >= t:
+            aligned[:, d] = state[-1, d]
+        else:
+            aligned[: t - delay, d] = state[delay:, d]
+            aligned[t - delay :, d] = state[-1, d]
+    return aligned
+
+
 def apply_state_action_temporal_alignment(
     state: np.ndarray,
     action: np.ndarray,
     lag: int,
     num_dims: int | None = None,
+    *,
+    target_delay: int = 1,
+    action_present: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Overwrite action[t] with state[t+lag] for matched dims (does not shift action)."""
-    if lag <= 0:
-        return action.copy()
+    """Align action to ``target_delay`` (default 1).
+
+    - Dims with real action (``action_present[d]=True``): temporally *shift* action by
+      ``(target_delay - lag)`` so that action[t] lines up with state[t+target_delay].
+      Does **not** overwrite action values with state.
+    - Dims missing action (``action_present[d]=False``): fill from state at
+      ``state[t+target_delay]``.
+
+    ``lag`` is the measured delay (positive => state lags action / action leads).
+    ``action_present`` defaults to all-True (shift-only).
+    """
     num_dims = num_dims if num_dims is not None else min(state.shape[1], action.shape[1])
+    num_dims = min(num_dims, state.shape[1], action.shape[1])
     aligned = action.copy()
-    limit = state.shape[0] - lag
-    if limit <= 0:
+    if num_dims <= 0:
         return aligned
-    aligned[:limit, :num_dims] = state[lag : lag + limit, :num_dims]
+
+    if action_present is None:
+        present = np.ones(num_dims, dtype=bool)
+    else:
+        present = np.asarray(action_present, dtype=bool).reshape(-1)
+        if present.size < num_dims:
+            pad = np.ones(num_dims - present.size, dtype=bool)
+            present = np.concatenate([present, pad])
+        present = present[:num_dims]
+
+    missing = [d for d in range(num_dims) if not present[d]]
+    if missing:
+        aligned = fill_action_from_state(
+            state, aligned, missing, target_delay=target_delay
+        )
+
+    # Shift existing action: measured lag L, want delay=1 => shift = 1 - L
+    # (out[t] = action[t + (1-L)])
+    shift = int(target_delay) - int(lag)
+    if shift != 0 and present.any():
+        for d in range(num_dims):
+            if present[d]:
+                aligned[:, d] = temporal_shift_rows(aligned[:, d], shift)
+
     return aligned
 
 
@@ -146,10 +396,25 @@ def alignment_metadata(
     cfg: StateActionAlignConfig,
     stats: StateActionAlignStats | None,
     lag: int,
+    *,
+    target_delay: int = 1,
+    plan: P4Plan | None = None,
 ) -> dict:
+    plan = plan or resolve_p4_plan(cfg)
     meta: dict = {
-        "state_action_alignment_applied": cfg.enabled and lag > 0,
+        "state_action_alignment_applied": bool(plan.apply_shift),
+        "state_action_alignment_plan": plan.name,
+        "state_action_alignment_mode": cfg.mode,
+        "state_action_alignment_apply_delay": bool(cfg.apply_delay),
+        "state_action_delay": resolve_state_action_delay(cfg, stats, plan),
         "state_action_alignment_lag": lag,
+        "state_action_alignment_target_delay": int(target_delay) if plan.name == "apply_stats" else None,
+        "state_action_alignment_manual_delay": plan.manual_delay,
+        "state_action_alignment_shift": (
+            -int(plan.manual_delay)
+            if plan.name == "manual" and plan.manual_delay is not None
+            else (int(target_delay) - int(lag) if plan.name == "apply_stats" else 0)
+        ),
     }
     if stats is not None:
         meta.update(

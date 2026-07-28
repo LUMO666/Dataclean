@@ -1,0 +1,17 @@
+{
+  "source": "egodex_lerobot_v21",
+  "target": "Dataclean/standard_info.json",
+  "notes": {
+    "state_action": "20d xyz+rot6d+gripper x2 → eef.pose rotvec + gripper.closedness",
+    "hand_features": "optional observation.state.hand_features"
+  },
+  "images": {
+    "observation.images.camera_top": "observation.images.camera_top"
+  },
+  "action": {
+    "action.eef.left.pose": "action[0:9] xyz+rot6d → xyz+rotvec",
+    "action.eef.right.pose": "action[10:19] xyz+rot6d → xyz+rotvec",
+    "action.gripper.left.closedness": "action[9]",
+    "action.gripper.right.closedness": "action[19]"
+  }
+}

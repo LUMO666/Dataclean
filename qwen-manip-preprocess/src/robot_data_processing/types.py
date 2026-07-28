@@ -17,7 +17,7 @@ class EpisodeResult:
     stage1_flagged_frames: int = 0
     stage2_da_mean: float | None = None
     stage2_da_per_dim: list[float] | None = None
-    stage2_lags: list[int] | None = None
+    stage2_lags: list[int | None] | None = None
     stage3_excluded_frames: int = 0
     stage4_removed_frames: int = 0
     metadata: dict[str, Any] = field(default_factory=dict)
