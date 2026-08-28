@@ -47,3 +47,10 @@ review_corrections:
 # Quality stages: reuse engine YAML shape (stage1–5). Paste from an existing config
 # or point quality_config_path to a shared yaml under qwen-manip-preprocess/config/.
 quality_config_path: null
+
+# P7 LeRobot export layout version
+export:
+  lerobot_version: v2.1  # v2.1 | v3.0 | both
+  v30:  # used when lerobot_version is v3.0 or both
+    data_file_size_in_mb: 100
+    video_file_size_in_mb: 200

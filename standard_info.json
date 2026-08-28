@@ -2,43 +2,76 @@
     "codebase_version": "v2.1",
     "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
     "features": {
-      "action.eef.left.pose": {
+      "action.eef.left.position": {
         "dtype": "float32",
         "names": [
           "left_eef_position_x_m", // 单位为m
           "left_eef_position_y_m",
-          "left_eef_position_z_m",
-          "left_eef_rotvec_rx",
-          "left_eef_rotvec_ry",
-          "left_eef_rotvec_rz"
+          "left_eef_position_z_m"
+        ],
+        "shape": [
+          3
+        ]
+      },
+      "action.eef.left.rotation_6d": {
+        "dtype": "float32",
+        "names": [
+          "left_eef_rotation_6d_r0c0",
+          "left_eef_rotation_6d_r0c1",
+          "left_eef_rotation_6d_r0c2",
+          "left_eef_rotation_6d_r1c0",
+          "left_eef_rotation_6d_r1c1",
+          "left_eef_rotation_6d_r1c2"
         ],
         "shape": [
           6
         ]
       },
-      "action.eef.right.pose": {
+      "action.eef.right.position": {
         "dtype": "float32",
         "names": [
           "right_eef_position_x_m",
           "right_eef_position_y_m",
-          "right_eef_position_z_m",
-          "right_eef_rotvec_rx",
-          "right_eef_rotvec_ry",
-          "right_eef_rotvec_rz"
+          "right_eef_position_z_m"
+        ],
+        "shape": [
+          3
+        ]
+      },
+      "action.eef.right.rotation_6d": {
+        "dtype": "float32",
+        "names": [
+          "right_eef_rotation_6d_r0c0",
+          "right_eef_rotation_6d_r0c1",
+          "right_eef_rotation_6d_r0c2",
+          "right_eef_rotation_6d_r1c0",
+          "right_eef_rotation_6d_r1c1",
+          "right_eef_rotation_6d_r1c2"
         ],
         "shape": [
           6
         ]
       },
-      "action.eef.primary.pose": {
+      "action.eef.primary.position": {
         "dtype": "float32",
         "names": [
           "primary_eef_position_x_m",
           "primary_eef_position_y_m",
-          "primary_eef_position_z_m",
-          "primary_eef_rotvec_rx",
-          "primary_eef_rotvec_ry",
-          "primary_eef_rotvec_rz"
+          "primary_eef_position_z_m"
+        ],
+        "shape": [
+          3
+        ]
+      },
+      "action.eef.primary.rotation_6d": {
+        "dtype": "float32",
+        "names": [
+          "primary_eef_rotation_6d_r0c0",
+          "primary_eef_rotation_6d_r0c1",
+          "primary_eef_rotation_6d_r0c2",
+          "primary_eef_rotation_6d_r1c0",
+          "primary_eef_rotation_6d_r1c1",
+          "primary_eef_rotation_6d_r1c2"
         ],
         "shape": [
           6
@@ -113,40 +146,37 @@
           1
         ]
       },
-      "action.geometry.eef.left.quaternion_wxyz": {
+      "action.geometry.eef.left.rotvec": {
         "dtype": "float32",
         "names": [
-          "w",
-          "x",
-          "y",
-          "z"
+          "left_eef_rotvec_rx",
+          "left_eef_rotvec_ry",
+          "left_eef_rotvec_rz"
         ],
         "shape": [
-          4
+          3
         ]
       },
-      "action.geometry.eef.right.quaternion_wxyz": {
+      "action.geometry.eef.right.rotvec": {
         "dtype": "float32",
         "names": [
-          "w",
-          "x",
-          "y",
-          "z"
+          "right_eef_rotvec_rx",
+          "right_eef_rotvec_ry",
+          "right_eef_rotvec_rz"
         ],
         "shape": [
-          4
+          3
         ]
       },
-      "action.geometry.eef.primary.quaternion_wxyz": {
+      "action.geometry.eef.primary.rotvec": {
         "dtype": "float32",
         "names": [
-          "w",
-          "x",
-          "y",
-          "z"
+          "primary_eef_rotvec_rx",
+          "primary_eef_rotvec_ry",
+          "primary_eef_rotvec_rz"
         ],
         "shape": [
-          4
+          3
         ]
       },
       "observation.images.camera_top": {  // 约定为mp4格式，
@@ -310,43 +340,76 @@
           3
         ]
       },
-      "observation.state.eef.left.pose": {
+      "observation.state.eef.left.position": {
         "dtype": "float32",
         "names": [
           "left_eef_position_x_m", // 单位为m
           "left_eef_position_y_m",
-          "left_eef_position_z_m",
-          "left_eef_rotvec_rx",
-          "left_eef_rotvec_ry",
-          "left_eef_rotvec_rz"
+          "left_eef_position_z_m"
+        ],
+        "shape": [
+          3
+        ]
+      },
+      "observation.state.eef.left.rotation_6d": {
+        "dtype": "float32",
+        "names": [
+          "left_eef_rotation_6d_r0c0",
+          "left_eef_rotation_6d_r0c1",
+          "left_eef_rotation_6d_r0c2",
+          "left_eef_rotation_6d_r1c0",
+          "left_eef_rotation_6d_r1c1",
+          "left_eef_rotation_6d_r1c2"
         ],
         "shape": [
           6
         ]
       },
-      "observation.state.eef.right.pose": {
+      "observation.state.eef.right.position": {
         "dtype": "float32",
         "names": [
           "right_eef_position_x_m",
           "right_eef_position_y_m",
-          "right_eef_position_z_m",
-          "right_eef_rotvec_rx",
-          "right_eef_rotvec_ry",
-          "right_eef_rotvec_rz"
+          "right_eef_position_z_m"
+        ],
+        "shape": [
+          3
+        ]
+      },
+      "observation.state.eef.right.rotation_6d": {
+        "dtype": "float32",
+        "names": [
+          "right_eef_rotation_6d_r0c0",
+          "right_eef_rotation_6d_r0c1",
+          "right_eef_rotation_6d_r0c2",
+          "right_eef_rotation_6d_r1c0",
+          "right_eef_rotation_6d_r1c1",
+          "right_eef_rotation_6d_r1c2"
         ],
         "shape": [
           6
         ]
       },
-      "observation.state.eef.primary.pose": {
+      "observation.state.eef.primary.position": {
         "dtype": "float32",
         "names": [
           "primary_eef_position_x_m",
           "primary_eef_position_y_m",
-          "primary_eef_position_z_m",
-          "primary_eef_rotvec_rx",
-          "primary_eef_rotvec_ry",
-          "primary_eef_rotvec_rz"
+          "primary_eef_position_z_m"
+        ],
+        "shape": [
+          3
+        ]
+      },
+      "observation.state.eef.primary.rotation_6d": {
+        "dtype": "float32",
+        "names": [
+          "primary_eef_rotation_6d_r0c0",
+          "primary_eef_rotation_6d_r0c1",
+          "primary_eef_rotation_6d_r0c2",
+          "primary_eef_rotation_6d_r1c0",
+          "primary_eef_rotation_6d_r1c1",
+          "primary_eef_rotation_6d_r1c2"
         ],
         "shape": [
           6
@@ -421,40 +484,37 @@
           1
         ]
       },
-      "observation.geometry.eef.left.quaternion_arm_wxyz": {
+      "observation.geometry.eef.left.rotvec": {
         "dtype": "float32",
         "names": [
-          "w",
-          "x",
-          "y",
-          "z"
+          "left_eef_rotvec_rx",
+          "left_eef_rotvec_ry",
+          "left_eef_rotvec_rz"
         ],
         "shape": [
-          4
+          3
         ]
       },
-      "observation.geometry.eef.right.quaternion_arm_wxyz": {
+      "observation.geometry.eef.right.rotvec": {
         "dtype": "float32",
         "names": [
-          "w",
-          "x",
-          "y",
-          "z"
+          "right_eef_rotvec_rx",
+          "right_eef_rotvec_ry",
+          "right_eef_rotvec_rz"
         ],
         "shape": [
-          4
+          3
         ]
       },
-      "observation.geometry.eef.primary.quaternion_wxyz": {
+      "observation.geometry.eef.primary.rotvec": {
         "dtype": "float32",
         "names": [
-          "w",
-          "x",
-          "y",
-          "z"
+          "primary_eef_rotvec_rx",
+          "primary_eef_rotvec_ry",
+          "primary_eef_rotvec_rz"
         ],
         "shape": [
-          4
+          3
         ]
       },
       "observation.state.hand_features":{

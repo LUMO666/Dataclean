@@ -94,7 +94,7 @@ P7 StandardExport ──────► 标准 LeRobot 输出根
 ### 操作
 
 1. 用数据集 `adapter.py` 将源 parquet 列映射为 Dataclean 标准键
-2. 旋转统一为 **rotvec**（四元数 xyzw→rotvec；EgoDex rot6d→rotvec）
+2. 旋转统一为 **wxyz 四元数**（四元数 xyzw→wxyz；EgoDex rot6d→wxyz）；geometry 可选存 **rotvec**
 3. 夹爪统一为 **closedness**（0=开，1=闭，⚠ 极性由人工确认）
 4. 相机键映射到 `observation.images.camera_*`
 5. 若配置 `require_camera_top` 且无上方视角 → 丢弃该 episode
@@ -104,10 +104,10 @@ P7 StandardExport ──────► 标准 LeRobot 输出根
 **Humanoid EE：** 源 `observation.state.end.position` 每臂 7d = xyz(3)+quat_xyzw(4)
 
 \[
-\text{pose}_6 = \big[\,x,y,z,\; \mathrm{RotVec}(q_{xyzw})\,\big]
+\text{pose}_7 = \big[\,x,y,z,\; w,x,y,z\,\big] \quad (\text{quat order: wxyz})
 \]
 
-**EgoDex：** 源 20d = 左(xyz+rot6d+g) + 右(…) → 标准 eef.pose(6) + gripper(1)
+**EgoDex：** 源 20d = 左(xyz+rot6d+g) + 右(…) → 标准 eef.pose(7) + gripper(1)
 
 ### 输入
 
@@ -126,11 +126,11 @@ P7 StandardExport ──────► 标准 LeRobot 输出根
 
 典型标准键（双臂）：
 
-- `action.eef.{left,right}.pose` — `(T,6)` m + rad rotvec  
+- `action.eef.{left,right}.pose` — `(T,7)` m + wxyz quaternion  
 - `action.gripper.{left,right}.closedness` — `(T,1)`  
 - `action.arm.{left,right}.joint_position` — `(T,6)` rad  
 - `observation.state.*` 对称字段  
-- `action.geometry.eef.*.quaternion_wxyz` — `(T,4)`（可选）
+- `action.geometry.eef.*.rotvec` — `(T,3)`（可选）
 
 **实现：** `datasets/<name>/adapter.py` · 几何：`normalize/transforms_standard.py`
 
@@ -261,7 +261,7 @@ P7 StandardExport ──────► 标准 LeRobot 输出根
 
 #### 算法
 
-在**有效前缀**内扫描：若连续帧满足 state、action 均不变（\(\|\Delta\|\le\epsilon\)），则每个静止 run 只保留前 `max_static_steps` 帧，其余 `remove=True`（稀疏删帧，非前缀截断）。
+在**有效前缀**内扫描：若连续帧满足 state、action 均不变（\(\|\Delta\|\le\epsilon\)），则每个静止 run 只保留前 `round(fps × max_static_duration_sec)` 帧（默认 1 秒），其余 `remove=True`（稀疏删帧，非前缀截断）。
 
 #### 输入 / 输出
 
@@ -417,7 +417,7 @@ EpisodeResult:
 
 | 列 | dtype / shape | 说明 |
 |----|---------------|------|
-| `action.eef.*.pose` | list f32, 6 | xyz + rotvec |
+| `action.eef.*.pose` | list f32, 7 | xyz + wxyz quaternion |
 | `action.gripper.*.closedness` | list f32, 1 | |
 | `action.arm.*.joint_position` | list f32, 6 | 若有 |
 | `observation.state.*` | 同上 | |

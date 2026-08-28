@@ -32,10 +32,10 @@ class RobomindAdapter:
         # EE blocks in state: [0:7] left, [7:14] right — first dim used as gripper proxy historically
         fields = {
             "observation.state.eef.left.pose": np.concatenate(
-                [state[:, 0:1], np.zeros((T, 5), dtype=np.float32)], axis=1
+                [state[:, 0:1], np.zeros((T, 6), dtype=np.float32)], axis=1
             ).astype(np.float32),
             "observation.state.eef.right.pose": np.concatenate(
-                [state[:, 7:8], np.zeros((T, 5), dtype=np.float32)], axis=1
+                [state[:, 7:8], np.zeros((T, 6), dtype=np.float32)], axis=1
             ).astype(np.float32),
             "observation.state.arm.left.joint_position": state[:, 14:20].astype(np.float32),
             "observation.state.arm.right.joint_position": state[:, 20:26].astype(np.float32),
@@ -46,10 +46,10 @@ class RobomindAdapter:
             "action.gripper.left.closedness": as_col(action[:, 0]),
             "action.gripper.right.closedness": as_col(action[:, 7]),
             "action.eef.left.pose": np.concatenate(
-                [action[:, 0:1], np.zeros((T, 5), dtype=np.float32)], axis=1
+                [action[:, 0:1], np.zeros((T, 6), dtype=np.float32)], axis=1
             ).astype(np.float32),
             "action.eef.right.pose": np.concatenate(
-                [action[:, 7:8], np.zeros((T, 5), dtype=np.float32)], axis=1
+                [action[:, 7:8], np.zeros((T, 6), dtype=np.float32)], axis=1
             ).astype(np.float32),
         }
         has_top = any(

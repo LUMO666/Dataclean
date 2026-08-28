@@ -5,6 +5,7 @@ import json
 import math
 import os
 import re
+import shutil
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from robot_data_processing.normalize.standard_types import StandardEpisode
+from robot_data_processing.frame_alignment import (
+    check_export_frame_alignment,
+    export_frame_indices,
+    probe_video_frames,
+)
 from robot_data_processing.phases.media import export_normalized_videos
 from robot_data_processing.types import EpisodeResult
 
@@ -136,6 +142,21 @@ def intrinsic_feature_specs(intrinsic: dict[str, Any] | None) -> dict[str, Any]:
         else:
             shape = [int(arr.size)]
         specs[key] = _feature_spec(shape)
+    return specs
+
+
+def v2_intrinsic_feature_specs(camera_intrinsics: dict[str, Any] | None) -> dict[str, Any]:
+    """Build info.json intrinsic specs for v2 episode geometry (reference/aux cameras)."""
+    specs: dict[str, Any] = {}
+    for cam, payload in (camera_intrinsics or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        if "matrix" in payload:
+            specs[f"{cam}.matrix"] = _feature_spec([3, 3])
+        if "dist_coeffs" in payload:
+            dist = payload["dist_coeffs"]
+            n = len(dist) if isinstance(dist, list) else 5
+            specs[f"{cam}.dist_coeffs"] = _feature_spec([n])
     return specs
 
 
@@ -264,9 +285,11 @@ def _export_one_task(
     camera_map: dict[str, str] = _EXPORT_POOL_STATE["camera_map"]
     fps = float(_EXPORT_POOL_STATE["fps"])
     target_height = int(_EXPORT_POOL_STATE["target_height"])
+    target_short_side = _EXPORT_POOL_STATE.get("target_short_side")
     max_keyframe_interval = int(_EXPORT_POOL_STATE["max_keyframe_interval"])
     normalize_videos = bool(_EXPORT_POOL_STATE["normalize_videos"])
     parallel_videos = bool(_EXPORT_POOL_STATE.get("parallel_videos", True))
+    skip_parameters = bool(_EXPORT_POOL_STATE.get("skip_parameters", False))
     default_source_root = Path(_EXPORT_POOL_STATE["source_root"])
 
     path, n = write_standard_episode_parquet(
@@ -278,8 +301,10 @@ def _export_one_task(
         task_index=task_index,
     )
     del path
-    write_parameters(output_root, ep)
+    if not skip_parameters:
+        write_parameters(output_root, ep)
     camera_sizes: dict[str, tuple[int, int]] = {}
+    keep_indices = export_frame_indices(ep.num_frames, keep_mask)
     if normalize_videos and camera_map:
         src_root = (
             default_source_root
@@ -293,10 +318,33 @@ def _export_one_task(
             ep.episode_index,
             camera_map,
             target_height=target_height,
+            target_short_side=(
+                int(target_short_side) if target_short_side is not None else None
+            ),
             max_keyframe_interval=max_keyframe_interval,
             source_episode_index=src_ep,
             parallel_videos=parallel_videos,
+            keep_indices=keep_indices,
+            fps=fps,
+            num_frames=int(ep.num_frames),
         )
+        out_chunk = ep.episode_index // 1000
+        for src_key, std_name in camera_map.items():
+            out_video = (
+                output_root
+                / "videos"
+                / f"chunk-{out_chunk:03d}"
+                / f"observation.images.{std_name}"
+                / f"episode_{ep.episode_index:06d}.mp4"
+            )
+            if not out_video.exists():
+                raise FileNotFoundError(f"Missing exported video: {out_video}")
+            n_vid = probe_video_frames(out_video)
+            if n_vid != n:
+                raise ValueError(
+                    f"exported video frame mismatch observation.images.{std_name}: "
+                    f"video={n_vid} parquet={n}"
+                )
     row = {
         "episode_index": ep.episode_index,
         "tasks": list(ep.meta.get("tasks") or []),
@@ -307,9 +355,188 @@ def _export_one_task(
         "dataset_root": ep.meta.get("dataset_root"),
         "task_index": int(task_index),
     }
+    if ep.meta.get("camera_intrinsics"):
+        row["camera_intrinsics"] = ep.meta["camera_intrinsics"]
     field_names = set(ep.fields.keys())
     field_names.update(_extrinsic_column_name(k) for k in ep.extrinsic.keys())
     return row, camera_sizes, field_names
+
+
+def _build_info_dict(
+    *,
+    episodes_out: list[dict[str, Any]],
+    kept: list[tuple[StandardEpisode, np.ndarray | None, int]],
+    fields_present: set[str],
+    camera_sizes: dict[str, tuple[int, int]],
+    camera_map: dict[str, str],
+    fps: float,
+    embodiment: str,
+    state_action_delay: int,
+    tasks_out: list[dict[str, Any]],
+    total_frames: int,
+    skip_parameters: bool,
+    info_extras: dict[str, Any] | None,
+    wrist_view_cameras: list[str] | None,
+    standard_info_path: Path | None,
+) -> dict[str, Any]:
+    camera_list = sorted(camera_sizes.keys()) or sorted(camera_map.values())
+    features = build_info_features(fields_present, camera_list)
+    wrist_set = set(wrist_view_cameras or [])
+    for cam_name, (h, w) in camera_sizes.items():
+        key = cam_name if cam_name.startswith("observation.images.") else f"observation.images.{cam_name}"
+        spec = _video_feature_spec(h, w, fps=fps)
+        if wrist_set:
+            short = cam_name.split(".")[-1] if "." in cam_name else cam_name
+            spec.setdefault("info", {})["camera.is_wrist_view"] = short in wrist_set
+        features[key] = spec
+    info_intrinsic: dict[str, Any] = {}
+    if kept:
+        ep0 = kept[0][0]
+        for name, arr in ep0.fields.items():
+            a = np.asarray(arr)
+            d = 1 if a.ndim == 1 else int(a.shape[-1])
+            features[name] = _feature_spec([d])
+        for key in ep0.extrinsic.keys():
+            features[_extrinsic_column_name(key)] = _feature_spec([4, 4])
+        if skip_parameters and ep0.meta.get("camera_intrinsics"):
+            info_intrinsic = v2_intrinsic_feature_specs(ep0.meta["camera_intrinsics"])
+        else:
+            info_intrinsic = intrinsic_feature_specs(ep0.intrinsic)
+
+    info: dict[str, Any] = {
+        "codebase_version": "v2.1",
+        "robot_type": embodiment,
+        "embodiment": embodiment,
+        "fps": fps,
+        "state_action_delay": state_action_delay,
+        "camera_view_direction": "arm_side",
+        "total_episodes": len(episodes_out),
+        "total_frames": total_frames,
+        "total_tasks": max(len(tasks_out), 1),
+        "total_videos": len(episodes_out) * max(len(camera_list), 1),
+        "total_chunks": max(
+            1,
+            math.ceil((max((ep.episode_index for ep, _, _ in kept), default=0) + 1) / 1000),
+        ),
+        "chunks_size": 1000,
+        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
+        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
+        "features": features,
+    }
+    if info_extras:
+        for key, val in info_extras.items():
+            if val is not None:
+                info[key] = val
+    if info_intrinsic:
+        info["intrinsic"] = info_intrinsic
+    if standard_info_path and standard_info_path.exists():
+        try:
+            template = load_json_with_comments(standard_info_path)
+            tmpl_feats = template.get("features") or {}
+            for k, v in tmpl_feats.items():
+                if k.startswith("observation.images."):
+                    continue
+                if k in features:
+                    features[k] = v
+            nested_ext = tmpl_feats.get("extrinsic") if isinstance(tmpl_feats.get("extrinsic"), dict) else None
+            if nested_ext:
+                for ek, ev in nested_ext.items():
+                    col = _extrinsic_column_name(ek)
+                    if col in features and isinstance(ev, dict):
+                        features[col] = {
+                            "dtype": ev.get("dtype", "float32"),
+                            "shape": list(ev.get("shape") or [4, 4]),
+                            "names": ev.get("names"),
+                        }
+            for k in list(features):
+                if k.startswith("observation.images.") and k not in {
+                    (n if n.startswith("observation.images.") else f"observation.images.{n}")
+                    for n in camera_sizes
+                }:
+                    del features[k]
+            for cam_name, (h, w) in camera_sizes.items():
+                key = (
+                    cam_name if cam_name.startswith("observation.images.") else f"observation.images.{cam_name}"
+                )
+                features[key] = _video_feature_spec(h, w, fps=fps)
+            info["features"] = features
+            tmpl_intr = template.get("intrinsic")
+            if isinstance(tmpl_intr, dict) and not skip_parameters:
+                merged = dict(info_intrinsic)
+                for ik, iv in tmpl_intr.items():
+                    if not isinstance(iv, dict):
+                        continue
+                    if ik in merged:
+                        merged[ik] = {
+                            "dtype": iv.get("dtype", merged[ik].get("dtype", "float32")),
+                            "shape": list(iv.get("shape") or merged[ik].get("shape")),
+                            "names": iv.get("names"),
+                        }
+                    else:
+                        merged[ik] = {
+                            "dtype": iv.get("dtype", "float32"),
+                            "shape": list(iv.get("shape") or [1]),
+                            "names": iv.get("names"),
+                        }
+                info["intrinsic"] = merged
+            for key in ("prompt_template", "horizon"):
+                if key in template:
+                    info[key] = template[key]
+        except Exception:
+            pass
+    info["total_tasks"] = max(len(tasks_out), 1)
+    return info
+
+
+def _write_v21_meta_files(
+    dataset_root: Path,
+    *,
+    info: dict[str, Any],
+    episodes_out: list[dict[str, Any]],
+    tasks_out: list[dict[str, Any]],
+    embodiment: str,
+) -> None:
+    meta_dir = dataset_root / "meta"
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    with (meta_dir / "info.json").open("w", encoding="utf-8") as f:
+        json.dump(info, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    with (meta_dir / "episodes.jsonl").open("w", encoding="utf-8") as f:
+        for row in episodes_out:
+            ep_row: dict[str, Any] = {
+                "episode_index": int(row["episode_index"]),
+                "tasks": list(row.get("tasks") or []),
+                "length": int(row["length"]),
+            }
+            if row.get("camera_intrinsics"):
+                ep_row["camera_intrinsics"] = row["camera_intrinsics"]
+            f.write(json.dumps(ep_row, ensure_ascii=False) + "\n")
+    with (meta_dir / "tasks.jsonl").open("w", encoding="utf-8") as f:
+        rows = tasks_out or [{"task_index": 0, "task": embodiment}]
+        for row in rows:
+            f.write(
+                json.dumps(
+                    {"task_index": int(row["task_index"]), "task": str(row["task"])},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    with (meta_dir / "episode_source_map.jsonl").open("w", encoding="utf-8") as f:
+        for row in episodes_out:
+            f.write(
+                json.dumps(
+                    {
+                        "episode_index": row["episode_index"],
+                        "source_episode_index": row.get("source_episode_index"),
+                        "part": row.get("part"),
+                        "task": row.get("task"),
+                        "task_index": row.get("task_index"),
+                        "dataset_root": row.get("dataset_root"),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
 
 
 def export_standard_dataset(
@@ -322,6 +549,7 @@ def export_standard_dataset(
     embodiment: str = "unknown",
     state_action_delay: int = 1,
     target_height: int = 384,
+    target_short_side: int | None = None,
     max_keyframe_interval: int = 10,
     standard_info_path: Path | None = None,
     normalize_videos: bool = True,
@@ -330,6 +558,14 @@ def export_standard_dataset(
     renumber_episodes: bool = False,
     task_name_to_index: dict[str, int] | None = None,
     show_progress: bool = True,
+    skip_parameters: bool = False,
+    info_extras: dict[str, Any] | None = None,
+    wrist_view_cameras: list[str] | None = None,
+    lerobot_version: str = "v2.1",
+    v30_output_root: Path | None = None,
+    v30_data_file_size_in_mb: int = 100,
+    v30_video_file_size_in_mb: int = 200,
+    keep_all_frames: bool = False,
 ) -> dict[str, Any]:
     """Export filtered standard episodes (+ optional video normalize).
 
@@ -337,25 +573,70 @@ def export_standard_dataset(
     When ``renumber_episodes`` is True, output episode ids become contiguous 0..N-1
     while ``meta.source_episode_index`` keeps the source id for video lookup.
 
-    ``task_name_to_index`` (from source ``meta/tasks.jsonl``) preserves original
-    ``task_index`` values when present.
+    ``lerobot_version`` controls the on-disk LeRobot layout:
+    - ``v2.1``: per-episode parquet/mp4 (default)
+    - ``v3.0``: merged chunk files; episode data is written once then finalized in-place
+    - ``both``: v2.1 at ``output_root`` and v3.0 at ``v30_output_root`` (or ``{output_root}_v30``)
     """
     from tqdm import tqdm
 
+    version = str(lerobot_version or "v2.1").lower()
+    if version not in ("v2.1", "v3.0", "both"):
+        raise ValueError(f"Unsupported lerobot_version: {lerobot_version!r}")
+    write_v30 = version in ("v3.0", "both")
+    if version == "v3.0":
+        renumber_episodes = True
+
     output_root = Path(output_root)
     output_root.mkdir(parents=True, exist_ok=True)
-    meta_dir = output_root / "meta"
-    meta_dir.mkdir(parents=True, exist_ok=True)
+
+    cache_root: Path | None = None
+    if version == "v3.0":
+        cache_root = output_root / ".lerobot_export_cache"
+        if cache_root.exists():
+            shutil.rmtree(cache_root)
+        cache_root.mkdir(parents=True, exist_ok=True)
+        dataset_root = cache_root
+    else:
+        dataset_root = output_root
 
     # Filter + assign lengths / global indices up front so workers can run independently.
     kept: list[tuple[StandardEpisode, np.ndarray | None, int]] = []
     skipped = 0
+    skipped_frame_alignment = 0
     for ep, result in episodes:
-        n = _kept_length(ep, result)
-        if n is None:
+        if result is not None and result.discard:
             skipped += 1
             continue
-        keep_mask = None if result is None else result.step_validity_mask
+        if keep_all_frames:
+            n = int(ep.num_frames)
+            if n <= 0:
+                skipped += 1
+                continue
+        else:
+            n = _kept_length(ep, result)
+            if n is None:
+                skipped += 1
+                continue
+        keep_mask = None
+        if not keep_all_frames and result is not None:
+            keep_mask = result.step_validity_mask
+        src_root = Path(ep.meta.get("dataset_root", source_root))
+        src_ep = int(ep.meta.get("source_episode_index", ep.episode_index))
+        align = check_export_frame_alignment(
+            num_frames=int(ep.num_frames),
+            fields=ep.fields,
+            extrinsic=ep.extrinsic,
+            keep_mask=keep_mask,
+            dataset_root=src_root,
+            source_episode_index=src_ep,
+            camera_map=camera_map if normalize_videos else {},
+            fps=float(fps),
+        )
+        if not align.ok:
+            skipped += 1
+            skipped_frame_alignment += 1
+            continue
         # Ensure source index is recorded before optional renumber
         ep.meta.setdefault("source_episode_index", ep.episode_index)
         kept.append((ep, keep_mask, n))
@@ -420,13 +701,15 @@ def export_standard_dataset(
     total_frames = 0
 
     pool_state = {
-        "output_root": str(output_root),
+        "output_root": str(dataset_root),
         "camera_map": camera_map,
         "fps": fps,
         "target_height": target_height,
+        "target_short_side": target_short_side,
         "max_keyframe_interval": max_keyframe_interval,
         "normalize_videos": normalize_videos,
         "parallel_videos": parallel_videos,
+        "skip_parameters": skip_parameters,
         "source_root": str(source_root),
     }
 
@@ -467,170 +750,84 @@ def export_standard_dataset(
             total_frames += int(row["length"])
 
     camera_list = sorted(camera_sizes.keys()) or sorted(camera_map.values())
-    features = build_info_features(fields_present, camera_list)
-    # Apply measured video resolutions (final scaled size)
-    for cam_name, (h, w) in camera_sizes.items():
-        key = cam_name if cam_name.startswith("observation.images.") else f"observation.images.{cam_name}"
-        features[key] = _video_feature_spec(h, w, fps=fps)
-    # Fix feature shapes from first kept episode (frame columns only; intrinsic is episode-level)
-    info_intrinsic: dict[str, Any] = {}
-    if kept:
-        ep0 = kept[0][0]
-        for name, arr in ep0.fields.items():
-            a = np.asarray(arr)
-            d = 1 if a.ndim == 1 else int(a.shape[-1])
-            features[name] = _feature_spec([d])
-        for key in ep0.extrinsic.keys():
-            features[_extrinsic_column_name(key)] = _feature_spec([4, 4])
-        info_intrinsic = intrinsic_feature_specs(ep0.intrinsic)
+    info = _build_info_dict(
+        episodes_out=episodes_out,
+        kept=kept,
+        fields_present=fields_present,
+        camera_sizes=camera_sizes,
+        camera_map=camera_map,
+        fps=fps,
+        embodiment=embodiment,
+        state_action_delay=state_action_delay,
+        tasks_out=tasks_out,
+        total_frames=total_frames,
+        skip_parameters=skip_parameters,
+        info_extras=info_extras,
+        wrist_view_cameras=wrist_view_cameras,
+        standard_info_path=standard_info_path,
+    )
+    _write_v21_meta_files(
+        dataset_root,
+        info=info,
+        episodes_out=episodes_out,
+        tasks_out=tasks_out,
+        embodiment=embodiment,
+    )
 
-    info: dict[str, Any] = {
-        "codebase_version": "v2.1",
-        "robot_type": embodiment,
-        "embodiment": embodiment,
-        "fps": fps,
-        "state_action_delay": state_action_delay,
-        "camera_view_direction": "arm_side",
-        "total_episodes": len(episodes_out),
-        "total_frames": total_frames,
-        "total_tasks": max(len(tasks_out), 1),
-        "total_videos": len(episodes_out) * max(len(camera_list), 1),
-        "total_chunks": max(
-            1,
-            math.ceil((max((ep.episode_index for ep, _, _ in kept), default=0) + 1) / 1000),
-        ),
-        "chunks_size": 1000,
-        "data_path": "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet",
-        "video_path": "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4",
-        "features": features,
-    }
-    if info_intrinsic:
-        # Same level as fps / embodiment (not under features / not per-frame)
-        info["intrinsic"] = info_intrinsic
-    if standard_info_path and standard_info_path.exists():
-        try:
-            template = load_json_with_comments(standard_info_path)
-            # Prefer template feature defs when key present
-            tmpl_feats = template.get("features") or {}
-            for k, v in tmpl_feats.items():
-                # Never take observation.images.* from template — sizes come from
-                # measured export output only (and only for cameras that were written).
-                if k.startswith("observation.images."):
-                    continue
-                if k in features:
-                    features[k] = v
-            nested_ext = tmpl_feats.get("extrinsic") if isinstance(tmpl_feats.get("extrinsic"), dict) else None
-            if nested_ext:
-                for ek, ev in nested_ext.items():
-                    col = _extrinsic_column_name(ek)
-                    if col in features and isinstance(ev, dict):
-                        features[col] = {
-                            "dtype": ev.get("dtype", "float32"),
-                            "shape": list(ev.get("shape") or [4, 4]),
-                            "names": ev.get("names"),
-                        }
-            # Drop any leftover image features not backed by exported videos, then
-            # write measured H/W (after template merge so nothing overwrites them).
-            for k in list(features):
-                if k.startswith("observation.images.") and k not in {
-                    (
-                        n
-                        if n.startswith("observation.images.")
-                        else f"observation.images.{n}"
-                    )
-                    for n in camera_sizes
-                }:
-                    del features[k]
-            for cam_name, (h, w) in camera_sizes.items():
-                key = (
-                    cam_name
-                    if cam_name.startswith("observation.images.")
-                    else f"observation.images.{cam_name}"
-                )
-                features[key] = _video_feature_spec(h, w, fps=fps)
-            info["features"] = features
-            tmpl_intr = template.get("intrinsic")
-            if isinstance(tmpl_intr, dict):
-                merged = dict(info_intrinsic)
-                for ik, iv in tmpl_intr.items():
-                    if not isinstance(iv, dict):
-                        continue
-                    if ik in merged:
-                        merged[ik] = {
-                            "dtype": iv.get("dtype", merged[ik].get("dtype", "float32")),
-                            "shape": list(iv.get("shape") or merged[ik].get("shape")),
-                            "names": iv.get("names"),
-                        }
-                    else:
-                        merged[ik] = {
-                            "dtype": iv.get("dtype", "float32"),
-                            "shape": list(iv.get("shape") or [1]),
-                            "names": iv.get("names"),
-                        }
-                info["intrinsic"] = merged
-            for key in ("prompt_template", "horizon"):
-                if key in template:
-                    info[key] = template[key]
-        except Exception:
-            pass
-
-    with (meta_dir / "info.json").open("w", encoding="utf-8") as f:
-        info["total_tasks"] = max(len(tasks_out), 1)
-        json.dump(info, f, indent=2, ensure_ascii=False)
-        f.write("\n")
-    with (meta_dir / "episodes.jsonl").open("w", encoding="utf-8") as f:
-        for row in episodes_out:
-            # LeRobot-standard episode row (match source meta/episodes.jsonl)
-            f.write(
-                json.dumps(
-                    {
-                        "episode_index": int(row["episode_index"]),
-                        "tasks": list(row.get("tasks") or []),
-                        "length": int(row["length"]),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-    with (meta_dir / "tasks.jsonl").open("w", encoding="utf-8") as f:
-        if not tasks_out:
-            tasks_out = [{"task_index": 0, "task": embodiment}]
-        for row in tasks_out:
-            f.write(
-                json.dumps(
-                    {"task_index": int(row["task_index"]), "task": str(row["task"])},
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-    with (meta_dir / "episode_source_map.jsonl").open("w", encoding="utf-8") as f:
-        for row in episodes_out:
-            f.write(
-                json.dumps(
-                    {
-                        "episode_index": row["episode_index"],
-                        "source_episode_index": row.get("source_episode_index"),
-                        "part": row.get("part"),
-                        "task": row.get("task"),
-                        "task_index": row.get("task_index"),
-                        "dataset_root": row.get("dataset_root"),
-                    },
-                    ensure_ascii=False,
-                )
-                + "\n"
-            )
-
-    summary = {
+    summary: dict[str, Any] = {
         "output_root": str(output_root),
+        "dataset_root": str(dataset_root),
+        "lerobot_version": version,
         "total_episodes": len(episodes_out),
         "total_frames": total_frames,
         "skipped_episodes": skipped,
+        "skipped_frame_alignment": skipped_frame_alignment,
         "cameras": camera_list,
         "state_action_delay": state_action_delay,
         "export_workers": workers,
         "parallel_videos": parallel_videos,
         "renumber_episodes": renumber_episodes,
+        "keep_all_frames": keep_all_frames,
+        "codebase_version": "v2.1" if version == "v2.1" else None,
     }
-    with (output_root / "export_report.json").open("w", encoding="utf-8") as f:
+
+    if write_v30:
+        from robot_data_processing.export_lerobot_v30 import (
+            install_v30_dataset,
+            install_v30_dataset_into_root,
+        )
+
+        if version == "v3.0":
+            assert cache_root is not None
+            v30_summary = install_v30_dataset_into_root(
+                cache_root,
+                output_root,
+                data_file_size_in_mb=int(v30_data_file_size_in_mb),
+                video_file_size_in_mb=int(v30_video_file_size_in_mb),
+            )
+            if cache_root.exists():
+                shutil.rmtree(cache_root)
+            summary["codebase_version"] = v30_summary.get("codebase_version")
+        else:
+            v30_root = Path(v30_output_root) if v30_output_root is not None else output_root.parent / f"{output_root.name}_v30"
+            v30_summary = install_v30_dataset(
+                dataset_root,
+                v30_root,
+                data_file_size_in_mb=int(v30_data_file_size_in_mb),
+                video_file_size_in_mb=int(v30_video_file_size_in_mb),
+            )
+            (v30_root / "lerobot_v30_export.json").write_text(
+                json.dumps(v30_summary, indent=2),
+                encoding="utf-8",
+            )
+        summary["lerobot_v30"] = v30_summary
+        if version == "v3.0":
+            (output_root / "lerobot_v30_export.json").write_text(
+                json.dumps(v30_summary, indent=2),
+                encoding="utf-8",
+            )
+
+    report_path = output_root / "export_report.json"
+    with report_path.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
     return summary

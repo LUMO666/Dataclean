@@ -7,9 +7,17 @@ import numpy as np
 
 @dataclass
 class Stage4Config:
-    max_static_steps: int = 5
+    max_static_duration_sec: float = 1.0
+    fps: float = 30.0
+    max_static_steps: int | None = None  # explicit override; else derived from duration * fps
     enabled: bool = True
     change_epsilon: float = 0.0
+
+    @property
+    def resolved_max_static_steps(self) -> int:
+        if self.max_static_steps is not None:
+            return max(1, int(self.max_static_steps))
+        return max(1, int(round(float(self.fps) * float(self.max_static_duration_sec))))
 
 
 @dataclass
@@ -80,6 +88,6 @@ def run_stage4(
     return detect_static_interval_removals(
         state,
         action,
-        max_static_steps=cfg.max_static_steps,
+        max_static_steps=cfg.resolved_max_static_steps,
         change_epsilon=cfg.change_epsilon,
     )

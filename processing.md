@@ -5,7 +5,7 @@
 | 符号 | 含义 |
 |------|------|
 | `Nd` | N 维向量或 N 维逐帧列 |
-| `[x, y, z, r_x, r_y, r_z]` | 末端位姿 7 维向量：位置 (m) + 旋转向量 (rad) |
+| `[x, y, z, w, x, y, z]` | 末端位姿 7 维向量：位置 (m) + 四元数 (wxyz) |
 | `T_{dst←src}` | 4×4 SE(3) 齐次变换矩阵，将 src 坐标系下的点变换到 dst 坐标系 |
 | `⚠ 人工查看` | 需人工介入确认或校验的步骤 |
 
@@ -19,7 +19,7 @@
 
 | 字段 | 维度 | 单位 / 取值 | 说明 |
 |------|------|-------------|------|
-| `eef.{left/right/primary}.pose` | 6d | m, rad | `[x, y, z, r_x, r_y, r_z]` |
+| `eef.{left/right/primary}.pose` | 7d | m, wxyz | `[x, y, z, w, x, y, z]` |
 | `gripper.{left/right/primary}.closedness` | 1d | 无量纲 | 0 = 全开，1 = 全闭 |
 | `arm.{left/right/primary}.joint_position` | 6d | rad | 关节角 |
 
@@ -27,7 +27,7 @@
 
 1. ⚠ 人工查看并确认坐标系方向和统一单位，并目视核对外参运动方向，查看四元数wxyz顺序
    - 若 `camera_top.T_ArmLeft_CameraTop` / `camera_top.T_ArmRight_CameraTop` 需改向：在 `config.yaml` → `review_corrections.extrinsic_rotation_correction` 中为对应键填入旋转矩阵 `R`（3×3 或 4×4），流水线仅对该键执行 `T' = R @ T`（其他外参不参与）
-   - 旋转表示：若非 rotvec 或四元数，先转为四元数，再转为 3d rotvec
+   - 旋转表示：若非四元数或 rotvec，先转为四元数；pose 主字段存 **wxyz 四元数**，geometry 可选存 **3d rotvec**
    - 如果是双臂本体，则分别记录 <role> = right,left ；如果是单臂本体则记录 <role> = primary
 2. **gripper.<role>.closedness** — ⚠ 人工查看 统一开合表示（0=全开，1=全闭）
    - 若源数据不符合该约定：在 `config.yaml` 的 `review_corrections.gripper_closedness_correction` 中分别填入 `action` / `state` 的 `{scale: a, offset: b}`，流水线分别对 `action.gripper.*.closedness` 与 `observation.state.gripper.*.closedness` 执行 `c' = a*c + b`（默认 clip 到 [0,1]）

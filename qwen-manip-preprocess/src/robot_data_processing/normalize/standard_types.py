@@ -58,3 +58,35 @@ class DatasetAdapter(Protocol):
     def camera_name_map(self) -> dict[str, str]:
         """Source video key → standard camera key (without observation.images. prefix)."""
         ...
+
+
+@dataclass
+class EpisodeGeometryResult:
+    """Output of P6 episode-frame geometry transform (v2 contract)."""
+
+    fields: dict[str, np.ndarray]
+    extrinsic: dict[str, np.ndarray]  # name -> (T,4,4) or (4,4)
+    camera_keys: list[str]
+    camera_mapping: dict[str, str]
+    camera_intrinsics: dict[str, Any]
+    video_export_map: dict[str, str]  # source observation.images.* -> output short name
+    episode_frame_definition: str
+    geometry_meta: dict[str, Any] = field(default_factory=dict)
+    wrist_view_cameras: list[str] = field(default_factory=list)
+    info_extras: dict[str, Any] = field(default_factory=dict)
+    discard: bool = False
+    discard_reasons: list[str] = field(default_factory=list)
+
+
+class EpisodeGeometry(Protocol):
+    """Per-dataset episode-frame geometry module (datasets/*/episode_geometry.py)."""
+
+    def apply_episode_frame_geometry(
+        self,
+        standard: StandardEpisode,
+        *,
+        ref: EpisodeRef,
+        geometry_cfg: dict[str, Any],
+        keymap: dict[str, Any],
+        stored_video_size: tuple[int, int] | None = None,
+    ) -> EpisodeGeometryResult: ...

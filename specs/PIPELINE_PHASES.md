@@ -13,7 +13,7 @@ This document is the operational companion to [`processing.md`](../processing.md
 | Phase | Name | Shared / Custom | Responsibility |
 |-------|------|-----------------|----------------|
 | **P0** | Ingest | custom discover + shared loader | Enumerate episodes; load parquet / video / parameters into `EpisodeRef` |
-| **P1** | SchemaNormalize | **custom adapter** + shared transforms | Source keys → Dataclean standard keys; rot→rotvec; gripper closedness; camera rename; drop if no `camera_top` |
+| **P1** | SchemaNormalize | **custom adapter** + shared transforms | Source keys → Dataclean standard keys; rot→wxyz quat; gripper closedness; camera rename; drop if no `camera_top` |
 | **P2** | ManualGate | **custom checklist** + shared gate | First slot `eef_direction`; block export until approved. Stage5 eef transforms off by default |
 | **P3** | QualityFilter | **shared** Stage1–4 (Stage5 off by default) | Sudden change, DA, extremes, static shorten; no eef SE(3) by default |
 | **P4** | TemporalAlign | **shared** + dataset `temporal_align` | Default: lag stats only. Optional `apply_delay` (align to delay=1) or `mode=manual` (`+k` delay / `-k` advance). Writes `state_action_delay` accordingly |

@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from robot_data_processing.lerobot_export import _video_encoder_args
+import numpy as np
+
+from robot_data_processing.lerobot_export import _video_encoder_args, extract_video_by_indices, trim_video
 
 
 def probe_video_size(path: Path) -> tuple[int, int]:
@@ -107,6 +111,64 @@ def normalize_video(
         return int(target_height), int(target_height)
 
 
+def normalize_video_short_side(
+    src: Path,
+    dst: Path,
+    *,
+    target_short_side: int = 384,
+    max_keyframe_interval: int = 10,
+) -> tuple[int, int]:
+    """Re-encode to H.264; scale so the shorter side equals ``target_short_side``."""
+    from robot_data_processing.normalize.episode_frame_geometry import target_short_side_size
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if not src.exists():
+        raise FileNotFoundError(src)
+
+    try:
+        src_h, src_w = probe_video_size(src)
+    except Exception:
+        src_h, src_w = 0, 0
+
+    if src_h > 0 and src_w > 0:
+        out_w, out_h = target_short_side_size(src_w, src_h, short_side=target_short_side)
+        vf = f"scale={out_w}:{out_h}"
+    else:
+        vf = f"scale=-2:{int(target_short_side)}"
+        out_h, out_w = int(target_short_side), 0
+
+    enc_args = _video_encoder_args()
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src),
+        "-vf",
+        vf,
+        *enc_args,
+        "-g",
+        str(max_keyframe_interval),
+        "-keyint_min",
+        str(max_keyframe_interval),
+        "-an",
+        str(dst),
+    ]
+    try:
+        subprocess.run(cmd, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError, RuntimeError):
+        shutil.copy2(src, dst)
+
+    try:
+        return probe_video_size(dst)
+    except Exception:
+        if out_w > 0:
+            return out_h, out_w
+        return int(target_short_side), int(target_short_side)
+
+
 def resolve_source_video(
     dataset_root: Path,
     episode_index: int,
@@ -122,6 +184,33 @@ def resolve_source_video(
     )
 
 
+def _prepare_video_source(
+    src: Path,
+    *,
+    keep_indices: np.ndarray | None,
+    fps: float,
+    num_frames: int,
+) -> tuple[Path, Path | None]:
+    """Return ``(source_path, temp_path_to_delete)`` optionally trimmed to kept frames."""
+    src = Path(src)
+    if keep_indices is None:
+        return src, None
+    indices = np.asarray(keep_indices, dtype=np.int64).reshape(-1)
+    if indices.size == 0:
+        raise ValueError(f"Cannot export video with empty keep_indices: {src}")
+    if int(indices.size) == int(num_frames) and np.array_equal(indices, np.arange(int(num_frames))):
+        return src, None
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".mp4")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    if np.array_equal(indices, np.arange(indices.size)) and int(indices[0]) == 0:
+        trim_video(src, tmp, int(indices.size), fps)
+    else:
+        extract_video_by_indices(src, tmp, indices, fps)
+    return tmp, tmp
+
+
 def export_normalized_videos(
     dataset_root: Path,
     output_root: Path,
@@ -129,16 +218,24 @@ def export_normalized_videos(
     camera_map: dict[str, str],
     *,
     target_height: int = 384,
+    target_short_side: int | None = None,
     max_keyframe_interval: int = 10,
     source_episode_index: int | None = None,
     parallel_videos: bool = True,
+    keep_indices: np.ndarray | None = None,
+    fps: float = 30.0,
+    num_frames: int | None = None,
 ) -> dict[str, tuple[int, int]]:
     """camera_map: source_key → standard camera name (e.g. camera_top).
+
+    When ``target_short_side`` is set, resize so the shorter side equals that value
+    (v2 episode geometry contract). Otherwise scale by ``target_height``.
 
     Returns ``{camera_name: (height, width)}`` for written videos.
     """
     src_ep = int(episode_index if source_episode_index is None else source_episode_index)
     out_chunk = episode_index // 1000
+    frame_count = int(num_frames if num_frames is not None else (keep_indices.size if keep_indices is not None else 0))
 
     jobs: list[tuple[str, Path, Path]] = []
     for src_key, std_name in camera_map.items():
@@ -162,13 +259,31 @@ def export_normalized_videos(
 
     def _one(job: tuple[str, Path, Path]) -> tuple[str, int, int]:
         std_name, src, dst = job
-        h, w = normalize_video(
+        trim_src, trim_tmp = _prepare_video_source(
             src,
-            dst,
-            target_height=target_height,
-            max_keyframe_interval=max_keyframe_interval,
+            keep_indices=keep_indices,
+            fps=fps,
+            num_frames=frame_count,
         )
-        return std_name, h, w
+        try:
+            if target_short_side is not None:
+                h, w = normalize_video_short_side(
+                    trim_src,
+                    dst,
+                    target_short_side=int(target_short_side),
+                    max_keyframe_interval=max_keyframe_interval,
+                )
+            else:
+                h, w = normalize_video(
+                    trim_src,
+                    dst,
+                    target_height=target_height,
+                    max_keyframe_interval=max_keyframe_interval,
+                )
+            return std_name, h, w
+        finally:
+            if trim_tmp is not None and trim_tmp.exists():
+                trim_tmp.unlink(missing_ok=True)
 
     sizes: dict[str, tuple[int, int]] = {}
     if parallel_videos and len(jobs) > 1:

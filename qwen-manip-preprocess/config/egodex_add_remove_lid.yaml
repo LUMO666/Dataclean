@@ -98,7 +98,7 @@ stage3:
 
 stage4:
   enabled: true
-  max_static_steps: 5
+  max_static_duration_sec: 1.0
   change_epsilon: 0.0
 
 stage5:

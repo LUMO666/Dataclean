@@ -3,7 +3,7 @@
   "target": "Dataclean/standard_info.json",
   "notes": {
     "action_eef_source": "observation.state.end.position (NOT action column)",
-    "rotation": "source quat xyzw -> pose rotvec; geometry fields reorder to wxyz",
+    "rotation": "source quat xyzw -> pose wxyz quaternion; v2 drops rotvec geometry fields",
     "primary_fields": "omit for dual-arm humanoid",
     "calibration_file": "parameters/chunk-XXX/episode_YYYYYY/calibration_bundle_optimized.json"
   },
@@ -25,45 +25,45 @@
   "action": {
     "action.eef.left.pose": {
       "source": "observation.state.end.position[0:7]",
-      "transform": "xyz + quat_xyzw_to_rotvec"
+      "transform": "xyz + quat_xyzw_to_wxyz"
     },
     "action.eef.right.pose": {
       "source": "observation.state.end.position[7:14]",
-      "transform": "xyz + quat_xyzw_to_rotvec"
+      "transform": "xyz + quat_xyzw_to_wxyz"
     },
     "action.arm.left.joint_position": "action.arm.position[0:6] | action[0:6]",
     "action.arm.right.joint_position": "action.arm.position[6:12] | action[6:12]",
     "action.gripper.left.closedness": "action.effector.position[0] | action[12]",
     "action.gripper.right.closedness": "action.effector.position[1] | action[13]",
-    "action.geometry.eef.left.quaternion_wxyz": {
+    "action.geometry.eef.left.rotvec": {
       "source": "observation.state.end.position[3:7]",
-      "transform": "xyzw -> wxyz"
+      "transform": "quat_xyzw_to_rotvec"
     },
-    "action.geometry.eef.right.quaternion_wxyz": {
+    "action.geometry.eef.right.rotvec": {
       "source": "observation.state.end.position[10:14]",
-      "transform": "xyzw -> wxyz"
+      "transform": "quat_xyzw_to_rotvec"
     }
   },
   "observation_state": {
     "observation.state.eef.left.pose": {
       "source": "observation.state.end.position[0:7]",
-      "transform": "xyz + quat_xyzw_to_rotvec"
+      "transform": "xyz + quat_xyzw_to_wxyz"
     },
     "observation.state.eef.right.pose": {
       "source": "observation.state.end.position[7:14]",
-      "transform": "xyz + quat_xyzw_to_rotvec"
+      "transform": "xyz + quat_xyzw_to_wxyz"
     },
     "observation.state.arm.left.joint_position": "observation.state.arm.position[0:6] | observation.state[0:6]",
     "observation.state.arm.right.joint_position": "observation.state.arm.position[6:12] | observation.state[6:12]",
     "observation.state.gripper.left.closedness": "observation.state.effector.position[0] | observation.state[12]",
     "observation.state.gripper.right.closedness": "observation.state.effector.position[1] | observation.state[13]",
-    "observation.geometry.eef.left.quaternion_arm_wxyz": {
+    "observation.geometry.eef.left.rotvec": {
       "source": "observation.state.end.position[3:7]",
-      "transform": "xyzw -> wxyz"
+      "transform": "quat_xyzw_to_rotvec"
     },
-    "observation.geometry.eef.right.quaternion_arm_wxyz": {
+    "observation.geometry.eef.right.rotvec": {
       "source": "observation.state.end.position[10:14]",
-      "transform": "xyzw -> wxyz"
+      "transform": "quat_xyzw_to_rotvec"
     }
   },
   "indices": {

@@ -6,11 +6,11 @@ schema:
   alignment_dims: 14
 
 dataset:
-  root: /mnt/project_rlinf_hs/dreamzero_pretrain_data/humanoid_merged
+  root: /mnt/public/algm/datasets/humanoid
   embodiment: humanoid
   robot_type: agilex_cobotmagic2
   fps: 30
-  total_episodes: 46475
+  total_episodes: 46463
 
 pipeline:
   num_workers: 128
@@ -115,7 +115,7 @@ stage3:
 
 stage4:
   enabled: true
-  max_static_steps: 5  # keep at most 5 frames per static run; remove the rest
+  max_static_duration_sec: 1.0  # keep at most 1s of frames per static run; steps = round(fps * duration)
   change_epsilon: 0.0
 
 stage5:

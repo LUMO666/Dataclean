@@ -53,6 +53,23 @@ def humanoid_state_arrays(state: np.ndarray) -> np.ndarray:
     return state.astype(np.float64, copy=False)
 
 
+def humanoid_state_from_raw(raw: dict[str, np.ndarray]) -> np.ndarray:
+    """Build 28d humanoid state from merged or split parquet columns."""
+    state = raw.get("observation.state")
+    if state is not None and state.shape[1] >= 28:
+        return state.astype(np.float64, copy=False)
+
+    arm = raw.get("observation.state.arm.position")
+    grip = raw.get("observation.state.effector.position")
+    end = raw.get("observation.state.end.position")
+    if arm is not None and grip is not None and end is not None:
+        return np.concatenate([arm, grip, end], axis=1).astype(np.float64)
+
+    if state is not None:
+        return state.astype(np.float64, copy=False)
+    raise ValueError("missing humanoid state columns")
+
+
 def humanoid_action_arrays(action: np.ndarray) -> np.ndarray:
     """Humanoid action: preserve original action dims (e.g. 14-dim arm+gripper)."""
     return action.astype(np.float64, copy=False)

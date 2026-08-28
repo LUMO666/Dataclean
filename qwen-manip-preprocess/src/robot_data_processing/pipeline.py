@@ -425,7 +425,10 @@ def run_pipeline(
                 "state_action_alignment_apply_delay": align_cfg.apply_delay,
                 "state_action_alignment_lag": align_lag,
                 "state_action_delay": delay_meta,
-                "stage4_max_static_steps": (cfg.stage4 or Stage4Config()).max_static_steps,
+                "stage4_max_static_duration_sec": (
+                    cfg.stage4 or Stage4Config()
+                ).max_static_duration_sec,
+                "stage4_max_static_steps": (cfg.stage4 or Stage4Config()).resolved_max_static_steps,
                 "stage5_enabled": (cfg.stage5 or Stage5Config()).enabled,
                 "embodiment": cfg.schema.embodiment,
                 "ignored_episodes": len(ignore_set),
@@ -476,6 +479,20 @@ def pipeline_config_from_yaml(yaml_cfg: dict, overrides: dict | None = None) -> 
     rpy_action = tuple(s3["exempt_dims"].get("rpy_action", list(schema.rpy_indices)))
 
     align_cfg = parse_temporal_align_config(ta, sa, overrides=overrides)
+    dataset_fps = float(overrides.get("fps", yaml_cfg.get("dataset", {}).get("fps", 30)))
+
+    s4_duration = float(
+        overrides.get(
+            "stage4_max_static_duration_sec",
+            s4.get("max_static_duration_sec", 1.0),
+        )
+    )
+    if "stage4_max_static_steps" in overrides:
+        s4_steps_override: int | None = int(overrides["stage4_max_static_steps"])
+    elif "max_static_steps" in s4:
+        s4_steps_override = int(s4["max_static_steps"])
+    else:
+        s4_steps_override = None
 
     return PipelineConfig(
         dataset_root=dataset_root,
@@ -562,7 +579,9 @@ def pipeline_config_from_yaml(yaml_cfg: dict, overrides: dict | None = None) -> 
             min_episode_length=s3["exclusion"]["min_episode_length"],
         ),
         stage4=Stage4Config(
-            max_static_steps=int(overrides.get("stage4_max_static_steps", s4.get("max_static_steps", 5))),
+            max_static_duration_sec=s4_duration,
+            fps=dataset_fps,
+            max_static_steps=s4_steps_override,
             enabled=bool(overrides.get("stage4_enabled", s4.get("enabled", True))),
             change_epsilon=float(overrides.get("stage4_change_epsilon", s4.get("change_epsilon", 0.0))),
         ),

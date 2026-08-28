@@ -38,8 +38,8 @@ DEFAULT_DATASET = Path(
 EXPECTED_HUMANOID_COLS = [
     "observation.state.eef.left.pose",
     "observation.state.eef.right.pose",
-    "observation.geometry.eef.left.quaternion_arm_wxyz",
-    "observation.geometry.eef.right.quaternion_arm_wxyz",
+    "observation.geometry.eef.left.rotvec",
+    "observation.geometry.eef.right.rotvec",
     "observation.state.arm.left.joint_position",
     "observation.state.arm.right.joint_position",
     "observation.state.gripper.left.closedness",
@@ -60,10 +60,10 @@ EXPECTED_HUMANOID_COLS = [
 ]
 
 EXPECTED_SHAPES = {
-    "observation.state.eef.left.pose": 6,
-    "observation.state.eef.right.pose": 6,
-    "action.eef.left.pose": 6,
-    "action.eef.right.pose": 6,
+    "observation.state.eef.left.pose": 7,
+    "observation.state.eef.right.pose": 7,
+    "action.eef.left.pose": 7,
+    "action.eef.right.pose": 7,
     "observation.state.arm.left.joint_position": 6,
     "observation.state.arm.right.joint_position": 6,
     "action.arm.left.joint_position": 6,
@@ -72,8 +72,8 @@ EXPECTED_SHAPES = {
     "observation.state.gripper.right.closedness": 1,
     "action.gripper.left.closedness": 1,
     "action.gripper.right.closedness": 1,
-    "observation.geometry.eef.left.quaternion_arm_wxyz": 4,
-    "observation.geometry.eef.right.quaternion_arm_wxyz": 4,
+    "observation.geometry.eef.left.rotvec": 3,
+    "observation.geometry.eef.right.rotvec": 3,
     "extrinsic.camera_top.T_ArmLeft_CameraTop": 16,
     "extrinsic.camera_top.T_ArmRight_CameraTop": 16,
     "extrinsic.camera_top.T_ArmLeft_CameraWristLeft": 16,
@@ -379,22 +379,39 @@ def run_checks(df: pd.DataFrame, info: dict[str, Any] | None, episode: int | Non
             issues.append(f"{c}: values outside ~[0,1]: [{lo:.4f}, {hi:.4f}]")
         print(f"  {c}: range=[{lo:.4f}, {hi:.4f}] mean={float(np.mean(g)):.4f}")
 
-    # quaternion unit norm
+    # pose quaternion unit norm (wxyz at indices 3:7)
     for c in [
-        "observation.geometry.eef.left.quaternion_arm_wxyz",
-        "observation.geometry.eef.right.quaternion_arm_wxyz",
+        "observation.state.eef.left.pose",
+        "observation.state.eef.right.pose",
+        "action.eef.left.pose",
+        "action.eef.right.pose",
     ]:
         if c not in df.columns:
             continue
-        q = as_array(df[c]).astype(np.float64)
-        if q.ndim != 2 or q.shape[1] != 4:
-            issues.append(f"{c}: bad shape {q.shape}")
+        p = as_array(df[c]).astype(np.float64)
+        if p.ndim != 2 or p.shape[1] != 7:
+            issues.append(f"{c}: bad shape {p.shape}")
             continue
+        q = p[:, 3:7]
         norms = np.linalg.norm(q, axis=1)
         err = float(np.max(np.abs(norms - 1.0)))
-        print(f"  {c}: |q| err_max={err:.3g} mean={float(np.mean(norms)):.6f}")
+        print(f"  {c} quat: |q| err_max={err:.3g} mean={float(np.mean(norms)):.6f}")
         if err > 5e-2:
             issues.append(f"{c}: quaternion not unit (max |||q||-1|={err:.3g})")
+
+    # geometry rotvec finite
+    for c in [
+        "observation.geometry.eef.left.rotvec",
+        "observation.geometry.eef.right.rotvec",
+    ]:
+        if c not in df.columns:
+            continue
+        rv = as_array(df[c]).astype(np.float64)
+        if rv.ndim != 2 or rv.shape[1] != 3:
+            issues.append(f"{c}: bad shape {rv.shape}")
+            continue
+        if np.any(~np.isfinite(rv)):
+            issues.append(f"{c}: contains non-finite")
 
     # extrinsics
     for c in [
@@ -420,8 +437,8 @@ def run_checks(df: pd.DataFrame, info: dict[str, Any] | None, episode: int | Non
         if c not in df.columns:
             continue
         p = as_array(df[c]).astype(np.float64)
-        if p.ndim != 2 or p.shape[1] != 6:
-            issues.append(f"{c}: expected (T,6), got {p.shape}")
+        if p.ndim != 2 or p.shape[1] != 7:
+            issues.append(f"{c}: expected (T,7), got {p.shape}")
             continue
         if np.any(~np.isfinite(p)):
             issues.append(f"{c}: contains non-finite")

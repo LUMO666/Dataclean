@@ -16,7 +16,7 @@ from robot_data_processing.schema import (
 from robot_data_processing.transforms import (
     egodex_to_canonical,
     humanoid_action_arrays,
-    humanoid_state_arrays,
+    humanoid_state_from_raw,
     robomind_ur_build_action,
     robomind_ur_build_state,
 )
@@ -33,7 +33,8 @@ def list_episode_indices(root: Path, total_episodes: int | None = None) -> list[
         for i in range(total_episodes):
             if episode_parquet_path(root, i).exists():
                 indices.append(i)
-        return indices
+        if indices:
+            return indices
 
     data_root = root / "data"
     for chunk_dir in sorted(data_root.glob("chunk-*")):
@@ -52,7 +53,7 @@ def _transform_to_canonical(
         return state, action
     if schema.embodiment == "humanoid":
         return (
-            humanoid_state_arrays(raw[schema.state_column]),
+            humanoid_state_from_raw(raw),
             humanoid_action_arrays(raw[schema.action_column]),
         )
     if schema.embodiment == "robomind_ur":

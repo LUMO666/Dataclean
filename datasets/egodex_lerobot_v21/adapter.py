@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 
 from robot_data_processing.normalize.standard_types import EpisodeRef, StandardEpisode
-from robot_data_processing.normalize.transforms_standard import as_col, rot6d_to_rotvec
+from robot_data_processing.normalize.transforms_standard import as_col, rot6d_to_rotvec, xyz_rot6d_to_pose7
 
 
 class EgoDexAdapter:
@@ -30,28 +30,33 @@ class EgoDexAdapter:
         action20 = np.asarray(raw.get("action", state20), dtype=np.float64)
         T = state20.shape[0]
 
-        def pose_from_20(x: np.ndarray, hand: str) -> np.ndarray:
+        def pose_from_20(x: np.ndarray, hand: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             if hand == "left":
                 xyz, rot6d, grip = x[:, 0:3], x[:, 3:9], x[:, 9:10]
             else:
                 xyz, rot6d, grip = x[:, 10:13], x[:, 13:19], x[:, 19:20]
+            pose = xyz_rot6d_to_pose7(xyz, rot6d)
             rotvec = rot6d_to_rotvec(rot6d)
-            return np.concatenate([xyz, rotvec], axis=1).astype(np.float32), as_col(grip)
+            return pose, rotvec.astype(np.float32), as_col(grip)
 
-        a_l, ag_l = pose_from_20(action20, "left")
-        a_r, ag_r = pose_from_20(action20, "right")
-        s_l, sg_l = pose_from_20(state20, "left")
-        s_r, sg_r = pose_from_20(state20, "right")
+        a_l, a_l_rot, ag_l = pose_from_20(action20, "left")
+        a_r, a_r_rot, ag_r = pose_from_20(action20, "right")
+        s_l, s_l_rot, sg_l = pose_from_20(state20, "left")
+        s_r, s_r_rot, sg_r = pose_from_20(state20, "right")
 
         fields = {
             "action.eef.left.pose": a_l,
             "action.eef.right.pose": a_r,
             "action.gripper.left.closedness": ag_l,
             "action.gripper.right.closedness": ag_r,
+            "action.geometry.eef.left.rotvec": a_l_rot,
+            "action.geometry.eef.right.rotvec": a_r_rot,
             "observation.state.eef.left.pose": s_l,
             "observation.state.eef.right.pose": s_r,
             "observation.state.gripper.left.closedness": sg_l,
             "observation.state.gripper.right.closedness": sg_r,
+            "observation.geometry.eef.left.rotvec": s_l_rot,
+            "observation.geometry.eef.right.rotvec": s_r_rot,
         }
         if "observation.state.hand_features" in raw or "hand_features" in raw:
             hf = raw.get("observation.state.hand_features", raw.get("hand_features"))
@@ -91,10 +96,11 @@ class EgoDexAdapter:
         ):
             pl = standard.fields[pose_l]
             pr = standard.fields[pose_r]
-            # store xyz + rotvec as xyz+rpy slots for quality (approximation)
-            arr[:, 0:6] = pl
+            arr[:, 0:3] = pl[:, 0:3]
+            arr[:, 3:6] = pl[:, 3:7] if pl.shape[1] >= 7 else 0.0
             arr[:, 6] = standard.fields[g_l].reshape(-1)
-            arr[:, 7:13] = pr
+            arr[:, 7:10] = pr[:, 0:3]
+            arr[:, 10:13] = pr[:, 3:7] if pr.shape[1] >= 7 else 0.0
             arr[:, 13] = standard.fields[g_r].reshape(-1)
         return state, action
 

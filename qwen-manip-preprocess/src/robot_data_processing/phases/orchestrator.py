@@ -12,6 +12,7 @@ from typing import Any, Callable
 import numpy as np
 import yaml
 
+from robot_data_processing.frame_alignment import check_import_frame_alignment, summarize_alignment_failure
 from robot_data_processing.gates.manual_gate import (
     assert_eef_direction_or_raise,
     assert_gate_or_raise,
@@ -125,6 +126,101 @@ def _resolve_quality_config(package_dir: Path, cfg: dict[str, Any], embodiment: 
     raise FileNotFoundError(f"No quality config for embodiment={embodiment}")
 
 
+def _load_episode_geometry(package_dir: Path, cfg: dict[str, Any]):
+    geom_cfg = cfg.get("episode_geometry") or {}
+    if not geom_cfg.get("enabled", False):
+        return None, geom_cfg
+    mod_name = str(geom_cfg.get("module", "episode_geometry"))
+    mod_path = package_dir / f"{mod_name}.py"
+    if not mod_path.exists():
+        print(f"[P6] episode_geometry.enabled but {mod_path} missing — skip", flush=True)
+        return None, geom_cfg
+    mod = _load_module(mod_path, f"dataclean_geom_{package_dir.name}")
+    for cls_name in (
+        "HumanoidEpisodeGeometry",
+        "EgoDexEpisodeGeometry",
+        "EpisodeGeometry",
+        "TemplateEpisodeGeometry",
+    ):
+        if hasattr(mod, cls_name):
+            return getattr(mod, cls_name)(package_dir), geom_cfg
+    if hasattr(mod, "build_episode_geometry"):
+        return mod.build_episode_geometry(package_dir), geom_cfg
+    raise RuntimeError(f"No episode geometry class in {mod_path}")
+
+
+def _apply_p6_geometry(
+    all_pairs: list[tuple[StandardEpisode, EpisodeResult | None]],
+    *,
+    episode_geometry,
+    geometry_cfg: dict[str, Any],
+    keymap: dict[str, Any],
+    refs_by_ep: dict[int, EpisodeRef],
+) -> tuple[dict[str, str], dict[str, Any], list[str]]:
+    """Run P6 on all episodes; return (video_export_map, info_extras, wrist_view)."""
+    video_export_map: dict[str, str] = {}
+    info_extras: dict[str, Any] = {}
+    wrist_view: list[str] = []
+    geom_discards = 0
+
+    for standard, result in all_pairs:
+        ref = refs_by_ep.get(standard.episode_index)
+        if ref is None:
+            ref = EpisodeRef(
+                episode_index=standard.episode_index,
+                dataset_root=Path(standard.meta.get("dataset_root", ".")),
+            )
+        try:
+            geom = episode_geometry.apply_episode_frame_geometry(
+                standard,
+                ref=ref,
+                geometry_cfg=geometry_cfg,
+                keymap=keymap,
+            )
+        except Exception as exc:
+            geom_discards += 1
+            print(f"  [P6] discard ep{standard.episode_index}: {exc}", flush=True)
+            if result is not None:
+                result.discard = True
+                result.discard_reasons.append(f"p6_geometry_error:{exc}")
+            continue
+
+        if geom.discard:
+            geom_discards += 1
+            print(
+                f"  [P6] discard ep{standard.episode_index}: {geom.discard_reasons}",
+                flush=True,
+            )
+            if result is not None:
+                result.discard = True
+                result.discard_reasons.extend(geom.discard_reasons)
+            continue
+
+        standard.fields = geom.fields
+        standard.extrinsic = geom.extrinsic
+        standard.camera_keys = geom.camera_keys
+        standard.intrinsic = {}
+        standard.meta = {
+            **standard.meta,
+            "camera_intrinsics": geom.camera_intrinsics,
+            "episode_frame_definition": geom.episode_frame_definition,
+            "geometry_meta": geom.geometry_meta,
+        }
+        if not video_export_map:
+            video_export_map = dict(geom.video_export_map)
+        if not info_extras and geom.info_extras:
+            info_extras = dict(geom.info_extras)
+        if not wrist_view and geom.wrist_view_cameras:
+            wrist_view = list(geom.wrist_view_cameras)
+
+    print(
+        f"[P6] episode geometry applied; discards={geom_discards} "
+        f"video_map={video_export_map}",
+        flush=True,
+    )
+    return video_export_map, info_extras, wrist_view
+
+
 def run_dataset_phases(
     *,
     package_dir: Path,
@@ -149,7 +245,7 @@ def run_dataset_phases(
     output_mode = pipe.get("output_mode", "both")
     force_skip = bool(force_skip_gate or pipe.get("force_skip_gate", False))
 
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     checklist = package_dir / "review_checklist.yaml"
@@ -197,6 +293,8 @@ def run_dataset_phases(
         keymap = json.loads(keymap_path.read_text(encoding="utf-8"))
     else:
         keymap = getattr(adapter, "keymap", {}) or {}
+    episode_geometry, geometry_cfg = _load_episode_geometry(package_dir, cfg)
+    geometry_enabled = bool(geometry_cfg.get("enabled", False)) and episode_geometry is not None
     qpath = _resolve_quality_config(package_dir, cfg, embodiment)
     yaml_cfg = load_config(qpath)
     if layout != "part_task":
@@ -368,6 +466,23 @@ def run_dataset_phases(
                 continue
 
             standard = apply_review_corrections(standard, cfg)
+            import_align = check_import_frame_alignment(
+                raw=raw,
+                standard_num_frames=int(standard.num_frames),
+                fields=standard.fields,
+                extrinsic=standard.extrinsic,
+                dataset_root=ref.dataset_root,
+                episode_index=ref.episode_index,
+                camera_keys=list(standard.camera_keys),
+                require_videos=bool(require_top or standard.camera_keys),
+            )
+            if not import_align.ok:
+                reason = summarize_alignment_failure(import_align, stage="import")
+                print(f"  [P1] discard ep{ref.episode_index}: {reason}", flush=True)
+                if r is not None:
+                    r.discard = True
+                    r.discard_reasons.append(reason)
+                continue
             # Stage2: fill missing action.eef from state.eef using joint lag (same policy as P3)
             s2_fill_cfg = Stage2Config(fill_missing_action_eef=fill_missing_action_eef_flag)
             # Copy DA-related thresholds from quality yaml when present
@@ -420,10 +535,10 @@ def run_dataset_phases(
                     r.discard_reasons.append(f"fps_unstable:{fps_check.message}")
                 continue
 
-            if speed_cfg.get("enabled") and "action.eef.left.pose" in standard.fields:
-                pose = standard.fields["action.eef.left.pose"]
+            if speed_cfg.get("enabled") and "action.eef.left.position" in standard.fields:
+                xyz = standard.fields["action.eef.left.position"]
                 sp = compute_speed_scale(
-                    pose,
+                    xyz,
                     fps,
                     golden_speed_mps=float(
                         speed_cfg.get("golden_speed_mps", DEFAULT_HUMANOID_GOLDEN_EE_SPEED)
@@ -440,7 +555,25 @@ def run_dataset_phases(
         total_standard += len(group_pairs)
         all_pairs.extend(group_pairs)
 
+    # P6 EpisodeFrameGeometry (before P7 export)
+    geom_info_extras: dict[str, Any] = {}
+    geom_wrist_view: list[str] = []
+    if geometry_enabled and all_pairs:
+        refs_by_ep = {r.episode_index: r for r in refs}
+        video_export_map, geom_info_extras, geom_wrist_view = _apply_p6_geometry(
+            all_pairs,
+            episode_geometry=episode_geometry,
+            geometry_cfg=geometry_cfg,
+            keymap=keymap,
+            refs_by_ep=refs_by_ep,
+        )
+        if video_export_map:
+            camera_map = dict(video_export_map)
+
     # P7: one flat LeRobot dataset at output_dir (no per-task subfolders)
+    export_cfg = cfg.get("export") or {}
+    lerobot_version = str(export_cfg.get("lerobot_version", "v2.1")).lower()
+    v30_cfg = export_cfg.get("v30") or {}
     if output_mode in ("filter", "both") and all_pairs:
         from robot_data_processing.export_standard import export_standard_dataset
 
@@ -451,14 +584,24 @@ def run_dataset_phases(
             state_action_delay = max(set(delay_samples), key=delay_samples.count)
         else:
             state_action_delay = 1
+
+        v30_output_root = None
+        if lerobot_version == "both":
+            v30_output_root = output_dir.parent / f"{output_dir.name}_v30"
+
         print(
-            f"[P7] standard export → {output_dir} ({len(all_pairs)} candidates); "
+            f"[P7] export → {output_dir} ({len(all_pairs)} candidates); "
             f"state_action_delay={state_action_delay} "
-            f"export_workers={export_workers} renumber={renumber_episodes}",
+            f"export_workers={export_workers} renumber={renumber_episodes} "
+            f"v2_geometry={geometry_enabled} lerobot_version={lerobot_version}",
             flush=True,
         )
         t_p7 = time.perf_counter()
-        export_standard_dataset(
+        short_side = geometry_cfg.get("video_short_side") if geometry_enabled else None
+        if short_side is None and geometry_enabled:
+            short_side = int(media_cfg.get("target_short_side", 384))
+
+        export_summary = export_standard_dataset(
             output_root=output_dir,
             episodes=all_pairs,
             camera_map=camera_map,
@@ -472,6 +615,7 @@ def run_dataset_phases(
                     media_cfg.get("target_width", 384),  # legacy alias
                 )
             ),
+            target_short_side=int(short_side) if short_side is not None else None,
             max_keyframe_interval=int(media_cfg.get("max_keyframe_interval", 10)),
             standard_info_path=std_info if std_info.exists() else None,
             normalize_videos=True,
@@ -480,8 +624,57 @@ def run_dataset_phases(
             renumber_episodes=renumber_episodes,
             task_name_to_index=merged_task_name_to_index or None,
             show_progress=True,
+            skip_parameters=geometry_enabled,
+            info_extras=geom_info_extras or None,
+            wrist_view_cameras=geom_wrist_view or None,
+            lerobot_version=lerobot_version,
+            v30_output_root=v30_output_root,
+            v30_data_file_size_in_mb=int(v30_cfg.get("data_file_size_in_mb", 100)),
+            v30_video_file_size_in_mb=int(v30_cfg.get("video_file_size_in_mb", 200)),
+            keep_all_frames=bool(export_cfg.get("keep_all_frames", False)),
         )
         _tick("p7_standard_export", t_p7)
+        if export_summary.get("lerobot_v30"):
+            v30_summary = export_summary["lerobot_v30"]
+            print(
+                f"[P7/v30] done: {v30_summary.get('codebase_version')} "
+                f"episodes={v30_summary.get('total_episodes')} → {v30_summary.get('output_root')}",
+                flush=True,
+            )
+            rel_cfg = cfg.get("relative_statistics") or {}
+            if geometry_enabled and rel_cfg.get("enabled", True):
+                from robot_data_processing.relative_statistics import (
+                    prepare_relative_action_statistics,
+                )
+
+                v30_root = Path(
+                    v30_summary.get("output_root")
+                    or (v30_output_root if lerobot_version == "both" else output_dir)
+                )
+                horizon_s = float(
+                    rel_cfg.get(
+                        "statistics_horizon_seconds",
+                        2.0,
+                    )
+                )
+                t_rel = time.perf_counter()
+                rel_payload = prepare_relative_action_statistics(
+                    v30_root,
+                    statistics_horizon_seconds=horizon_s,
+                    rebuild=True,
+                )
+                _tick("p7_relative_statistics", t_rel)
+                print(
+                    f"[P7/rel] statistics_relative.json: anchors={rel_payload['anchor_count']} "
+                    f"frames={rel_payload['source_frame_count']} → {v30_root / 'meta' / 'statistics_relative.json'}",
+                    flush=True,
+                )
+                export_summary["relative_statistics"] = {
+                    "anchor_count": rel_payload["anchor_count"],
+                    "source_frame_count": rel_payload["source_frame_count"],
+                    "output_path": str(v30_root / "meta" / "statistics_relative.json"),
+                }
+        del export_summary
 
     elapsed = time.perf_counter() - t0
     timings["total"] = round(elapsed, 3)
@@ -490,6 +683,7 @@ def run_dataset_phases(
         "p3_quality": [k for k in timings if k.startswith("p3_quality_group_")],
         "p1_standardize": [k for k in timings if k.startswith("p1_standardize_group_")],
         "p7_standard_export": [k for k in timings if k == "p7_standard_export" or k.startswith("p7_standard_export_")],
+        "p7_relative_statistics": [k for k in timings if k == "p7_relative_statistics"],
         "p3_global_stats": [k for k in timings if k.endswith("p3_global_stats")],
         "p3_stage1_stats": [k for k in timings if k.endswith("p3_stage1_stats")],
         "p3_state_action_lag_stats": [k for k in timings if k.endswith("p3_state_action_lag_stats")],

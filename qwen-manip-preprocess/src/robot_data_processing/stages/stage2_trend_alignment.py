@@ -2,7 +2,7 @@
 
 Pairs physically corresponding state/action attributes:
 
-* ``observation.state.eef.<role>.pose`` ↔ ``action.eef.<role>.pose``
+* ``observation.state.eef.<role>.position`` / ``rotation_6d`` ↔ ``action.eef.<role>.position`` / ``rotation_6d``
 * ``observation.state.arm.<role>.joint_position`` ↔ ``action.arm.<role>.joint_position``
 
 Roles: bimanual → ``left``+``right``; single-arm → ``primary``.
@@ -17,7 +17,7 @@ Lag / DA flow per episode:
    else discard (``维度间延迟不匹配``).
 4. Align **diffs** of all dims with the unified episode lag, then compute per-dim DA.
 
-If ``action.eef.<role>.pose`` is missing/empty and ``fill_missing_action_eef`` is
+If ``action.eef.<role>.position`` / ``rotation_6d`` is missing/empty and ``fill_missing_action_eef`` is
 enabled (default), fill from state.eef using the **global** P4 ``lag_mean``
 (``cfg.fill_lag`` / ``fill_lag`` argument) so downstream export has action.eef::
 
@@ -98,9 +98,9 @@ def detect_arm_roles(fields: dict[str, np.ndarray]) -> list[str]:
     def _role_present(role: str) -> bool:
         for key in (
             f"observation.state.arm.{role}.joint_position",
-            f"observation.state.eef.{role}.pose",
+            f"observation.state.eef.{role}.position",
             f"action.arm.{role}.joint_position",
-            f"action.eef.{role}.pose",
+            f"action.eef.{role}.position",
         ):
             if not _is_missing_field(fields, key):
                 return True
@@ -325,7 +325,7 @@ def fill_missing_action_eef(
     roles: list[str] | None = None,
     fill_lag: int | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, bool], dict[str, int]]:
-    """Fill missing/empty ``action.eef.<role>.pose`` from state.eef using global lag.
+    """Fill missing/empty ``action.eef.<role>.position`` / ``rotation_6d`` from state using global lag.
 
     ``fill_lag`` (argument) or ``cfg.fill_lag`` should be P4 global ``lag_mean``.
     All roles share the same lag. Returns ``(fields, filled_flags, fill_lags)``.
@@ -344,19 +344,25 @@ def fill_missing_action_eef(
     lag_fill = int(np.clip(0 if lag_src is None else int(lag_src), 0, cfg.max_lag_frames))
 
     for role in roles:
-        a_key = f"action.eef.{role}.pose"
-        s_key = f"observation.state.eef.{role}.pose"
-        if not _is_missing_field(fields, a_key):
+        a_pos_key = f"action.eef.{role}.position"
+        a_rot_key = f"action.eef.{role}.rotation_6d"
+        s_pos_key = f"observation.state.eef.{role}.position"
+        s_rot_key = f"observation.state.eef.{role}.rotation_6d"
+        if not _is_missing_field(fields, a_pos_key) and not _is_missing_field(fields, a_rot_key):
             filled[role] = False
             fill_lags[role] = 0
             continue
-        if _is_missing_field(fields, s_key):
+        if _is_missing_field(fields, s_pos_key) or _is_missing_field(fields, s_rot_key):
             filled[role] = False
             fill_lags[role] = 0
             continue
-        fields[a_key] = shift_state_to_action_timeline(fields[s_key], lag_fill).astype(
+        fields[a_pos_key] = shift_state_to_action_timeline(fields[s_pos_key], lag_fill).astype(
             np.float32, copy=False
         )
+        fields[a_rot_key] = shift_state_to_action_timeline(fields[s_rot_key], lag_fill).astype(
+            np.float32, copy=False
+        )
+        fields.pop(f"action.eef.{role}.pose", None)
         filled[role] = True
         fill_lags[role] = lag_fill
     return fields, filled, fill_lags
@@ -376,12 +382,13 @@ def _iter_da_pairs(
     skip_eef = skip_eef_roles or set()
     pairs: list[tuple[str, np.ndarray, np.ndarray]] = []
     for role in roles:
+        if role in skip_eef:
+            arm_only = True
+        else:
+            arm_only = False
         for kind, suffix, label in (
-            ("eef", "pose", "eef"),
             ("arm", "joint_position", "arm"),
         ):
-            if kind == "eef" and role in skip_eef:
-                continue
             s_key = f"observation.state.{kind}.{role}.{suffix}"
             a_key = f"action.{kind}.{role}.{suffix}"
             if _is_missing_field(fields, s_key) or _is_missing_field(fields, a_key):
@@ -393,6 +400,20 @@ def _iter_da_pairs(
             n_dims = min(s.shape[1], a.shape[1])
             for d in range(n_dims):
                 pairs.append((f"{label}.{role}.{suffix}[{d}]", s[:, d], a[:, d]))
+        if arm_only:
+            continue
+        for suffix in ("position", "rotation_6d"):
+            s_key = f"observation.state.eef.{role}.{suffix}"
+            a_key = f"action.eef.{role}.{suffix}"
+            if _is_missing_field(fields, s_key) or _is_missing_field(fields, a_key):
+                continue
+            s = _as_2d(fields[s_key])
+            a = _as_2d(fields[a_key])
+            n = min(s.shape[0], a.shape[0])
+            s, a = s[:n], a[:n]
+            n_dims = min(s.shape[1], a.shape[1])
+            for d in range(n_dims):
+                pairs.append((f"eef.{role}.{suffix}[{d}]", s[:, d], a[:, d]))
     return pairs
 
 
@@ -615,19 +636,23 @@ def canonical_to_stage2_fields(
             fields["action.arm.right.joint_position"] = action[:, 6:12]
         if state.shape[1] >= 28:
             from robot_data_processing.normalize.transforms_standard import (
-                xyz_quat_xyzw_to_pose6,
+                xyz_quat_xyzw_to_position_rotation_6d,
             )
 
-            fields["observation.state.eef.left.pose"] = xyz_quat_xyzw_to_pose6(state[:, 14:21])
-            fields["observation.state.eef.right.pose"] = xyz_quat_xyzw_to_pose6(state[:, 21:28])
+            left_pos, left_rot = xyz_quat_xyzw_to_position_rotation_6d(state[:, 14:21])
+            right_pos, right_rot = xyz_quat_xyzw_to_position_rotation_6d(state[:, 21:28])
+            fields["observation.state.eef.left.position"] = left_pos
+            fields["observation.state.eef.left.rotation_6d"] = left_rot
+            fields["observation.state.eef.right.position"] = right_pos
+            fields["observation.state.eef.right.rotation_6d"] = right_rot
         return fields
 
     if embodiment == "egodex":
         if state.shape[1] >= 14 and action.shape[1] >= 14:
-            fields["observation.state.eef.left.pose"] = state[:, 0:6].astype(np.float32)
-            fields["observation.state.eef.right.pose"] = state[:, 7:13].astype(np.float32)
-            fields["action.eef.left.pose"] = action[:, 0:6].astype(np.float32)
-            fields["action.eef.right.pose"] = action[:, 7:13].astype(np.float32)
+            fields["observation.state.eef.left.pose"] = state[:, 0:7].astype(np.float32)
+            fields["observation.state.eef.right.pose"] = state[:, 7:14].astype(np.float32)
+            fields["action.eef.left.pose"] = action[:, 0:7].astype(np.float32)
+            fields["action.eef.right.pose"] = action[:, 7:14].astype(np.float32)
         return fields
 
     if embodiment in ("robomind_ur", "ur"):

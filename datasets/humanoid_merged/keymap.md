@@ -46,35 +46,35 @@
 
 | 目标键 | shape | 源键 / 切片 | 转换说明 |
 |---|---|---|---|
-| `action.eef.left.pose` | 6 | （缺失时）`observation.state.eef.left.pose` + 关节 lag | Stage2 补全 |
-| `action.eef.right.pose` | 6 | （缺失时）`observation.state.eef.right.pose` + 关节 lag | Stage2 补全 |
-| `action.eef.primary.pose` | 6 | — | 双臂场景 **不适用 / 省略** |
+| `action.eef.left.pose` | 7 | （缺失时）`observation.state.eef.left.pose` + 关节 lag | Stage2 补全 |
+| `action.eef.right.pose` | 7 | （缺失时）`observation.state.eef.right.pose` + 关节 lag | Stage2 补全 |
+| `action.eef.primary.pose` | 7 | — | 双臂场景 **不适用 / 省略** |
 | `action.arm.left.joint_position` | 6 | `action.arm.position[0:6]` 或 `action[0:6]` | `fl_joint1..6`，单位 rad，直接拷贝 |
 | `action.arm.right.joint_position` | 6 | `action.arm.position[6:12]` 或 `action[6:12]` | `fr_joint1..6` |
 | `action.arm.primary.joint_position` | 6 | — | **省略** |
 | `action.gripper.left.closedness` | 1 | `action.effector.position[0]` 或 `action[12]` | `fl_joint7/8`；约定 0=全开、1=全闭（⚠ 需人工确认量纲是否已是 closedness） |
 | `action.gripper.right.closedness` | 1 | `action.effector.position[1]` 或 `action[13]` | 同上，右爪 |
 | `action.gripper.primary.closedness` | 1 | — | **省略** |
-| `action.geometry.eef.left.quaternion_wxyz` | 4 | （可选）与补全后的 eef 一致 | 可由 state geometry 导出；非必须 |
-| `action.geometry.eef.right.quaternion_wxyz` | 4 | （可选）与补全后的 eef 一致 | 同上 |
-| `action.geometry.eef.primary.quaternion_wxyz` | 4 | — | **省略** |
+| `action.geometry.eef.left.rotvec` | 3 | （可选）与补全后的 eef 一致 | 可由 state geometry 导出；非必须 |
+| `action.geometry.eef.right.rotvec` | 3 | （可选）与补全后的 eef 一致 | 同上 |
+| `action.geometry.eef.primary.rotvec` | 3 | — | **省略** |
 
 ### 2.1 `observation.state.end.position` 分量对照（源 14d）
 
 | 源 index | 源 name | 用于目标 |
 |---|---|---|
 | 0–2 | `l_x,l_y,l_z` | `*.eef.left.pose[0:3]` |
-| 3–6 | `l_qx,l_qy,l_qz,l_qw` | left rotvec / left quaternion_wxyz |
+| 3–6 | `l_qx,l_qy,l_qz,l_qw` | left wxyz quaternion / left rotvec |
 | 7–9 | `r_x,r_y,r_z` | `*.eef.right.pose[0:3]` |
-| 10–13 | `r_qx,r_qy,r_qz,r_qw` | right rotvec / right quaternion_wxyz |
+| 10–13 | `r_qx,r_qy,r_qz,r_qw` | right wxyz quaternion / right rotvec |
 
 旋转转换（建议）：
 ```python
 from scipy.spatial.transform import Rotation as R
-# pose rotvec
-rotvec = R.from_quat([qx, qy, qz, qw]).as_rotvec()  # scipy 默认 xyzw
-# geometry quaternion_wxyz
+# pose wxyz quaternion
 wxyz = [qw, qx, qy, qz]
+# geometry rotvec
+rotvec = R.from_quat([qx, qy, qz, qw]).as_rotvec()  # scipy 默认 xyzw
 ```
 
 ---
@@ -83,18 +83,18 @@ wxyz = [qw, qx, qy, qz]
 
 | 目标键 | shape | 源键 / 切片 | 转换说明 |
 |---|---|---|---|
-| `observation.state.eef.left.pose` | 6 | `observation.state.end.position[0:7]` | 与 action.eef.left 相同转换 |
-| `observation.state.eef.right.pose` | 6 | `observation.state.end.position[7:14]` | 与 action.eef.right 相同 |
-| `observation.state.eef.primary.pose` | 6 | — | **省略** |
+| `observation.state.eef.left.pose` | 7 | `observation.state.end.position[0:7]` | 与 action.eef.left 相同转换 |
+| `observation.state.eef.right.pose` | 7 | `observation.state.end.position[7:14]` | 与 action.eef.right 相同 |
+| `observation.state.eef.primary.pose` | 7 | — | **省略** |
 | `observation.state.arm.left.joint_position` | 6 | `observation.state.arm.position[0:6]` 或 `observation.state[0:6]` | `fl_joint1..6` |
 | `observation.state.arm.right.joint_position` | 6 | `observation.state.arm.position[6:12]` 或 `observation.state[6:12]` | `fr_joint1..6` |
 | `observation.state.arm.primary.joint_position` | 6 | — | **省略** |
 | `observation.state.gripper.left.closedness` | 1 | `observation.state.effector.position[0]` 或 `observation.state[12]` | ⚠ 同 action gripper |
 | `observation.state.gripper.right.closedness` | 1 | `observation.state.effector.position[1]` 或 `observation.state[13]` | ⚠ 同 action gripper |
 | `observation.state.gripper.primary.closedness` | 1 | — | **省略** |
-| `observation.geometry.eef.left.quaternion_arm_wxyz` | 4 | `observation.state.end.position[3:7]` | xyzw → wxyz |
-| `observation.geometry.eef.right.quaternion_arm_wxyz` | 4 | `observation.state.end.position[10:14]` | xyzw → wxyz |
-| `observation.geometry.eef.primary.quaternion_wxyz` | 4 | — | **省略** |
+| `observation.geometry.eef.left.rotvec` | 3 | `observation.state.end.position[3:7]` | xyzw → rotvec |
+| `observation.geometry.eef.right.rotvec` | 3 | `observation.state.end.position[10:14]` | xyzw → rotvec |
+| `observation.geometry.eef.primary.rotvec` | 3 | — | **省略** |
 | `observation.state.hand_features` | — | — | ego 专用；humanoid **省略** |
 
 ### 3.1 源合并列 `observation.state` (28d) 拆分备忘
@@ -103,7 +103,7 @@ wxyz = [qw, qx, qy, qz]
 |---|---|---|
 | `[0:12]` | arm joints | `observation.state.arm.{left,right}.joint_position` |
 | `[12:14]` | effector | `observation.state.gripper.{left,right}.closedness` |
-| `[14:28]` | end pose (同 `end.position`) | eef pose + quaternion |
+| `[14:28]` | end pose (同 `end.position`) | eef pose + rotvec |
 
 ---
 
@@ -171,7 +171,7 @@ wxyz = [qw, qx, qy, qz]
 | `action` (14d 合并) | 拆分为 arm/gripper 后可不保留 |
 | `observation.state.arm.position` | 拆到 left/right joint |
 | `observation.state.effector.position` | 拆到 gripper closedness |
-| `observation.state.end.position` | 拆到 eef pose + geometry quaternion；并作为 **action.eef** 来源 |
+| `observation.state.end.position` | 拆到 eef pose + geometry rotvec；并作为 **action.eef** 来源 |
 | `action.arm.position` / `action.effector.position` | 拆到目标 action.* |
 | `timestamps` | 丢弃 |
 
@@ -195,8 +195,8 @@ end = row["observation.state.end.position"]  # 14
 left_xyz, left_q_xyzw = end[0:3], end[3:7]
 right_xyz, right_q_xyzw = end[7:10], end[10:14]
 
-action_eef_left = concat(left_xyz, quat_xyzw_to_rotvec(left_q_xyzw))   # 6
-action_eef_right = concat(right_xyz, quat_xyzw_to_rotvec(right_q_xyzw))
+action_eef_left = concat(left_xyz, quat_xyzw_to_wxyz(left_q_xyzw))   # 7
+action_eef_right = concat(right_xyz, quat_xyzw_to_wxyz(right_q_xyzw))
 
 action_arm_left  = row["action.arm.position"][0:6]
 action_arm_right = row["action.arm.position"][6:12]

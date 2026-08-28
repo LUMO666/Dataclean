@@ -6,13 +6,14 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from scipy.spatial.transform import Rotation
 
 from robot_data_processing.normalize.calibration import load_mapped_calibration
 from robot_data_processing.normalize.standard_types import EpisodeRef, StandardEpisode
 from robot_data_processing.normalize.transforms_standard import (
     as_col,
-    quat_xyzw_to_wxyz,
-    xyz_quat_xyzw_to_pose6,
+    rotation_6d_to_matrices,
+    xyz_quat_xyzw_to_position_rotation_6d,
 )
 
 
@@ -64,13 +65,13 @@ class HumanoidAdapter:
                 arm_obs = state[:, 0:12]
                 grip_obs = state[:, 12:14] if grip_obs is None else grip_obs
 
+        left_pos, left_rot6d = xyz_quat_xyzw_to_position_rotation_6d(end[:, 0:7])
+        right_pos, right_rot6d = xyz_quat_xyzw_to_position_rotation_6d(end[:, 7:14])
         fields: dict[str, np.ndarray] = {
-            "observation.state.eef.left.pose": xyz_quat_xyzw_to_pose6(end[:, 0:7]),
-            "observation.state.eef.right.pose": xyz_quat_xyzw_to_pose6(end[:, 7:14]),
-            "observation.geometry.eef.left.quaternion_arm_wxyz": quat_xyzw_to_wxyz(end[:, 3:7]).astype(np.float32),
-            "observation.geometry.eef.right.quaternion_arm_wxyz": quat_xyzw_to_wxyz(end[:, 10:14]).astype(
-                np.float32
-            ),
+            "observation.state.eef.left.position": left_pos,
+            "observation.state.eef.left.rotation_6d": left_rot6d,
+            "observation.state.eef.right.position": right_pos,
+            "observation.state.eef.right.rotation_6d": right_rot6d,
         }
         # action.eef is intentionally omitted when source has no separate EE action;
         # Stage2 fill_missing_action_eef will set action.eef[t]=state.eef[t+global_lag].
@@ -124,8 +125,10 @@ class HumanoidAdapter:
         ra = standard.fields.get("observation.state.arm.right.joint_position")
         lg = standard.fields.get("observation.state.gripper.left.closedness")
         rg = standard.fields.get("observation.state.gripper.right.closedness")
-        le = standard.fields.get("observation.state.eef.left.pose")
-        re = standard.fields.get("observation.state.eef.right.pose")
+        le_pos = standard.fields.get("observation.state.eef.left.position")
+        le_rot = standard.fields.get("observation.state.eef.left.rotation_6d")
+        re_pos = standard.fields.get("observation.state.eef.right.position")
+        re_rot = standard.fields.get("observation.state.eef.right.rotation_6d")
         if la is not None:
             state[:, 0:6] = la
         if ra is not None:
@@ -134,11 +137,18 @@ class HumanoidAdapter:
             state[:, 12] = lg.reshape(-1)
         if rg is not None:
             state[:, 13] = rg.reshape(-1)
-        # EE block: store xyz + zeros for quat slots (quality uses full state elsewhere via engine)
-        if le is not None:
-            state[:, 14:17] = le[:, 0:3]
-        if re is not None:
-            state[:, 21:24] = re[:, 0:3]
+        if le_pos is not None:
+            state[:, 14:17] = le_pos
+        if le_rot is not None:
+            state[:, 17:21] = Rotation.from_matrix(
+                rotation_6d_to_matrices(le_rot, name="left EEF")
+            ).as_quat()
+        if re_pos is not None:
+            state[:, 21:24] = re_pos
+        if re_rot is not None:
+            state[:, 24:28] = Rotation.from_matrix(
+                rotation_6d_to_matrices(re_rot, name="right EEF")
+            ).as_quat()
         aa = standard.fields.get("action.arm.left.joint_position")
         ab = standard.fields.get("action.arm.right.joint_position")
         ag = standard.fields.get("action.gripper.left.closedness")
