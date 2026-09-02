@@ -80,6 +80,29 @@ def _video_feature_spec(
     }
 
 
+def _camera_short_name(cam_name: str) -> str:
+    return cam_name.split(".")[-1] if "." in cam_name else cam_name
+
+
+def _apply_wrist_view_flags(
+    features: dict[str, Any],
+    camera_sizes: dict[str, tuple[int, int]],
+    wrist_view_cameras: list[str] | None,
+) -> None:
+    """Annotate every exported video camera with ``camera.is_wrist_view``."""
+    wrist_set = {_camera_short_name(name) for name in (wrist_view_cameras or [])}
+    for cam_name in camera_sizes:
+        key = cam_name if cam_name.startswith("observation.images.") else f"observation.images.{cam_name}"
+        spec = features.get(key)
+        if not isinstance(spec, dict):
+            continue
+        info = spec.setdefault("info", {})
+        if not isinstance(info, dict):
+            info = {}
+            spec["info"] = info
+        info["camera.is_wrist_view"] = _camera_short_name(cam_name) in wrist_set
+
+
 def _extrinsic_column_name(key: str) -> str:
     return key if key.startswith("extrinsic.") else f"extrinsic.{key}"
 
@@ -381,14 +404,10 @@ def _build_info_dict(
 ) -> dict[str, Any]:
     camera_list = sorted(camera_sizes.keys()) or sorted(camera_map.values())
     features = build_info_features(fields_present, camera_list)
-    wrist_set = set(wrist_view_cameras or [])
     for cam_name, (h, w) in camera_sizes.items():
         key = cam_name if cam_name.startswith("observation.images.") else f"observation.images.{cam_name}"
-        spec = _video_feature_spec(h, w, fps=fps)
-        if wrist_set:
-            short = cam_name.split(".")[-1] if "." in cam_name else cam_name
-            spec.setdefault("info", {})["camera.is_wrist_view"] = short in wrist_set
-        features[key] = spec
+        features[key] = _video_feature_spec(h, w, fps=fps)
+    _apply_wrist_view_flags(features, camera_sizes, wrist_view_cameras)
     info_intrinsic: dict[str, Any] = {}
     if kept:
         ep0 = kept[0][0]
@@ -459,6 +478,7 @@ def _build_info_dict(
                     cam_name if cam_name.startswith("observation.images.") else f"observation.images.{cam_name}"
                 )
                 features[key] = _video_feature_spec(h, w, fps=fps)
+            _apply_wrist_view_flags(features, camera_sizes, wrist_view_cameras)
             info["features"] = features
             tmpl_intr = template.get("intrinsic")
             if isinstance(tmpl_intr, dict) and not skip_parameters:

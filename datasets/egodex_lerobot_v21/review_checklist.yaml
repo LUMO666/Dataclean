@@ -5,7 +5,7 @@ reviewer: null
 
 items:
   eef_direction:
-    status: pending
+    status: approved
     notes: >-
       FIRST: confirm camera-frame eef / +Z forward AND ArmLeft/Right↔CameraTop extrinsics.
       Correction: config.yaml review_corrections.extrinsic_rotation_correction keys

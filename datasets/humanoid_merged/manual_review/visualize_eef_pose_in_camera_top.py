@@ -24,9 +24,9 @@ import numpy as np
 import pandas as pd
 from scipy.spatial.transform import Rotation
 
-DEFAULT_DATASET = Path("/mnt/project_rlinf_hs/dreamzero_pretrain_data/humanoid_merged")
+DEFAULT_DATASET = Path("/mnt/pfs/datasets/egodex/part1_lerobot")
 DEFAULT_OUTPUT_DIR = Path(
-    "/mnt/project_rlinf_hs/liuweilin/Dataclean/datasets/humanoid_merged/manual_review/results"
+    "/mnt/pfs/Data/liuweilin/Dataclean/datasets/egodex_lerobot_v21/manual_review/results"
 )
 CAMERA_KEY = "observation.images.camera_top"
 EEF_KEY = "observation.state.end.position"

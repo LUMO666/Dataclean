@@ -648,11 +648,31 @@ def canonical_to_stage2_fields(
         return fields
 
     if embodiment == "egodex":
+        # Quality space is canonical 14d: left/right xyz(3)+rpy(3)+gripper(1).
+        # Stage2 DA expects standard keys: eef.*.position / rotation_6d.
         if state.shape[1] >= 14 and action.shape[1] >= 14:
-            fields["observation.state.eef.left.pose"] = state[:, 0:7].astype(np.float32)
-            fields["observation.state.eef.right.pose"] = state[:, 7:14].astype(np.float32)
-            fields["action.eef.left.pose"] = action[:, 0:7].astype(np.float32)
-            fields["action.eef.right.pose"] = action[:, 7:14].astype(np.float32)
+            from scipy.spatial.transform import Rotation
+
+            from robot_data_processing.normalize.transforms_standard import (
+                matrices_to_rotation_6d,
+            )
+
+            def _rpy_to_rot6d(rpy: np.ndarray) -> np.ndarray:
+                mats = Rotation.from_euler("xyz", np.asarray(rpy, dtype=np.float64)).as_matrix()
+                return matrices_to_rotation_6d(mats, name="egodex_rpy")
+
+            fields["observation.state.eef.left.position"] = state[:, 0:3].astype(np.float32)
+            fields["observation.state.eef.left.rotation_6d"] = _rpy_to_rot6d(state[:, 3:6])
+            fields["observation.state.gripper.left.closedness"] = state[:, 6:7].astype(np.float32)
+            fields["observation.state.eef.right.position"] = state[:, 7:10].astype(np.float32)
+            fields["observation.state.eef.right.rotation_6d"] = _rpy_to_rot6d(state[:, 10:13])
+            fields["observation.state.gripper.right.closedness"] = state[:, 13:14].astype(np.float32)
+            fields["action.eef.left.position"] = action[:, 0:3].astype(np.float32)
+            fields["action.eef.left.rotation_6d"] = _rpy_to_rot6d(action[:, 3:6])
+            fields["action.gripper.left.closedness"] = action[:, 6:7].astype(np.float32)
+            fields["action.eef.right.position"] = action[:, 7:10].astype(np.float32)
+            fields["action.eef.right.rotation_6d"] = _rpy_to_rot6d(action[:, 10:13])
+            fields["action.gripper.right.closedness"] = action[:, 13:14].astype(np.float32)
         return fields
 
     if embodiment in ("robomind_ur", "ur"):

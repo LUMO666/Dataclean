@@ -9,20 +9,19 @@ dataset:
 pipeline:
   num_workers: 150
   export_workers: 150
-  output_mode: both
+  output_mode: filter
   force_skip_gate: false
   parallel_videos: true
   recompute_video_stats: false
-  sample_mode: sequential  # sequential | random (used with --sample-size)
-  # Union: missing calibration + extrinsic outliers (analysis.flagged_episodes)
+  sample_mode: sequential
   ignore_episodes_paths:
     - /mnt/pfs/Data/liuweilin/Dataclean/datasets/humanoid_merged/ignore_no_calibration.json
     - /mnt/pfs/Data/liuweilin/Dataclean/datasets/humanoid_merged/extrinsic_outliers_full_v2.json
 
 media:
-  target_height: 384  # legacy height resize when episode_geometry disabled
-  target_short_side: 384  # v2: scale shorter side to 384
-  max_keyframe_interval: 10  # ffmpeg -g / -keyint_min
+  target_height: 384
+  target_short_side: 384
+  max_keyframe_interval: 10
   require_camera_top: true
 
 episode_geometry:
@@ -31,7 +30,6 @@ episode_geometry:
   episode_frame: "camera_reference at frame_index=0"
   video_short_side: 384
   source_calibration_size: [1280, 720]
-
   cameras:
     reference: observation.images.camera_top
     aux:
@@ -42,7 +40,6 @@ episode_geometry:
       camera_aux_0: camera_wrist_left
       camera_aux_1: camera_wrist_right
     wrist_view: [camera_aux_0, camera_aux_1]
-
   extrinsics:
     source: calibration_bundle_optimized.json
     reference_to_arm:
@@ -52,7 +49,6 @@ episode_geometry:
       camera_aux_0: camera_top.T_ArmLeft_CameraWristLeft
       camera_aux_1: camera_top.T_ArmRight_CameraWristRight
     reference_is_fixed: true
-
   action:
     eef_source: observation.state.end.position
     eef_target_index: "min(t + lag, episode_length - 1)"
@@ -66,21 +62,14 @@ speed_align:
   golden_speed_mps: 0.08
   target_fps: 30
 
-# P4 TemporalAlign — read by orchestrator / pipeline
-#   mode: stats (default) | manual
-#   apply_delay: false → only lag stats; state_action_delay = lag_mean
-#   apply_delay: true  → shift action to delay=1; state_action_delay = 1
-#   mode: manual + manual_delay: +k delays action by k; -k advances by |k|
 temporal_align:
   apply_delay: false
   mode: stats
   manual_delay: null
 
-# Stage2: DA on standard eef/arm keys; fill action.eef from state.eef when missing
 stage2:
   fill_missing_action_eef: true
 
-# P2 review numeric fixes (after eef_direction / gripper_closedness checklist)
 review_corrections:
   extrinsic_rotation_correction:
     camera_top.T_ArmLeft_CameraTop: null
@@ -91,11 +80,10 @@ review_corrections:
 
 quality_config_path: qwen-manip-preprocess/config/humanoid_merged.yaml
 
-# P7 export format (LeRobot dataset layout version)
 export:
-  lerobot_version: v3.0  # v2.1 | v3.0 | both
-  renumber_episodes: true  # set true when relative_statistics.enabled
-  v30:  # used when lerobot_version is v3.0 or both
+  lerobot_version: v3.0
+  renumber_episodes: true
+  v30:
     data_file_size_in_mb: 100
     video_file_size_in_mb: 200
 

@@ -1,0 +1,69 @@
+dataset:
+  name: egodex_lerobot_v21
+  root: /mnt/project_rlinf_hs/dreamzero_pretrain_data/22T_data/egodex_lerobot_v21
+  embodiment: egodex
+  fps: 30
+  layout: part_task
+pipeline:
+  num_workers: 64
+  export_workers: 64
+  output_mode: both
+  force_skip_gate: true
+  parallel_videos: true
+  recompute_video_stats: false
+  sample_mode: sequential
+media:
+  target_height: 384
+  target_short_side: 384
+  max_keyframe_interval: 10
+  require_camera_top: true
+episode_geometry:
+  enabled: true
+  module: episode_geometry
+  episode_frame: camera_reference at frame_index=0
+  video_short_side: 384
+  source_calibration_size:
+  - 1920
+  - 1080
+  poses_in_episode_frame: true
+  cameras:
+    reference: observation.images.camera_top
+    aux: []
+    mapping:
+      camera_reference: camera_top
+    wrist_view: []
+  extrinsics:
+    source: observation.camera_extrinsics_world
+    reference_is_fixed: false
+  action:
+    eef_source: action
+    eef_target_index: min(t + lag, episode_length - 1)
+    eef_tail_policy: repeat final EEF state for tail rows
+speed_align:
+  enabled: true
+  golden_embodiment: humanoid
+  golden_speed_mps: 0.08
+  target_fps: 30
+temporal_align:
+  apply_delay: false
+  mode: stats
+  manual_delay: null
+stage2:
+  fill_missing_action_eef: true
+review_corrections:
+  extrinsic_rotation_correction:
+    camera_top.T_ArmLeft_CameraTop: null
+    camera_top.T_ArmRight_CameraTop: null
+  gripper_closedness_correction:
+    action: null
+    state: null
+quality_config_path: qwen-manip-preprocess/config/egodex_22T.yaml
+export:
+  lerobot_version: v3.0
+  renumber_episodes: true
+  v30:
+    data_file_size_in_mb: 100
+    video_file_size_in_mb: 200
+relative_statistics:
+  enabled: true
+  statistics_horizon_seconds: 2.0

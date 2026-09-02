@@ -3,14 +3,19 @@ from __future__ import annotations
 import json
 import multiprocessing as mp
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import yaml
 
-from robot_data_processing.ignore_list import filter_episode_indices, load_ignore_episode_list, write_ignore_episode_list
+from robot_data_processing.ignore_list import (
+    filter_episode_indices,
+    load_ignore_episode_list,
+    load_ignore_episode_lists,
+    write_ignore_episode_list,
+)
 from robot_data_processing.loader import (
     episode_parquet_path,
     read_episode_canonical,
@@ -89,7 +94,8 @@ class PipelineConfig:
     export_workers: int | None = None
     parallel_videos: bool = True
     skip_alignment_verify: bool = False
-    ignore_episodes_path: Path | None = None
+    ignore_episodes_path: Path | None = None  # singular (compat); prefer ignore_episodes_paths
+    ignore_episodes_paths: list[Path] = field(default_factory=list)
 
 
 _WORKER_STATE: dict[str, Any] = {}
@@ -282,14 +288,19 @@ def run_pipeline(
         return time.perf_counter()
 
     pipe_t0 = time.perf_counter()
-    ignore_set = load_ignore_episode_list(cfg.ignore_episodes_path) if cfg.ignore_episodes_path else set()
+    ignore_paths = list(cfg.ignore_episodes_paths)
+    if not ignore_paths and cfg.ignore_episodes_path is not None:
+        ignore_paths = [cfg.ignore_episodes_path]
+    ignore_set = load_ignore_episode_lists(ignore_paths)
     if ignore_set:
         before = len(episode_indices)
         episode_indices = filter_episode_indices(episode_indices, ignore_set)
         ignored_manifest = {
             "reason": "pipeline ignore list",
-            "source": str(cfg.ignore_episodes_path),
+            "source": str(ignore_paths[0]) if len(ignore_paths) == 1 else None,
+            "sources": [str(p) for p in ignore_paths],
             "ignored_count": before - len(episode_indices),
+            "ignore_list_size": len(ignore_set),
             "episode_indices": sorted(ignore_set),
         }
         meta_dir = cfg.output_dir / "meta"
@@ -297,7 +308,10 @@ def run_pipeline(
         with (meta_dir / "ignored_episodes.json").open("w", encoding="utf-8") as f:
             json.dump(ignored_manifest, f, indent=2, ensure_ascii=False)
         if show_progress:
-            print(f"Ignoring {len(ignore_set)} episodes from ignore list ({before} -> {len(episode_indices)})")
+            print(
+                f"Ignoring {len(ignore_set)} episodes from {len(ignore_paths)} ignore list(s) "
+                f"({before} -> {len(episode_indices)})"
+            )
 
     stats_eps = stats_episode_indices or episode_indices
     stats_eps = filter_episode_indices(stats_eps, ignore_set)
@@ -432,7 +446,8 @@ def run_pipeline(
                 "stage5_enabled": (cfg.stage5 or Stage5Config()).enabled,
                 "embodiment": cfg.schema.embodiment,
                 "ignored_episodes": len(ignore_set),
-                "ignore_episodes_path": str(cfg.ignore_episodes_path) if cfg.ignore_episodes_path else None,
+                "ignore_episodes_path": str(ignore_paths[0]) if len(ignore_paths) == 1 else None,
+                "ignore_episodes_paths": [str(p) for p in ignore_paths],
             },
         )
         write_quality_report(cfg.output_dir / "reports" / "quality_report.json", report)
@@ -455,8 +470,34 @@ def _resolve_ignore_episodes_path(value: str | Path | None) -> Path | None:
     path = Path(value)
     if path.is_absolute():
         return path
-    repo_root = Path(__file__).resolve().parents[2]
-    return repo_root / path
+    repo_root = Path(__file__).resolve().parents[2]  # qwen-manip-preprocess/
+    candidate = repo_root / path
+    if candidate.exists():
+        return candidate
+    # Fallback: Dataclean repo root (parent of qwen-manip-preprocess)
+    dataclean_root = repo_root.parent
+    alt = dataclean_root / path
+    if alt.exists():
+        return alt
+    return candidate
+
+
+def _resolve_ignore_episode_paths(
+    pipe: dict[str, Any],
+    overrides: dict[str, Any],
+) -> list[Path]:
+    raw = overrides.get("ignore_episodes_paths", pipe.get("ignore_episodes_paths"))
+    if raw is None:
+        single = overrides.get("ignore_episodes_path", pipe.get("ignore_episodes_path"))
+        raw = [single] if single is not None else []
+    elif isinstance(raw, (str, Path)):
+        raw = [raw]
+    paths: list[Path] = []
+    for item in raw:
+        resolved = _resolve_ignore_episodes_path(item)
+        if resolved is not None:
+            paths.append(resolved)
+    return paths
 
 
 def pipeline_config_from_yaml(yaml_cfg: dict, overrides: dict | None = None) -> PipelineConfig:
@@ -516,9 +557,8 @@ def pipeline_config_from_yaml(yaml_cfg: dict, overrides: dict | None = None) -> 
         skip_alignment_verify=bool(
             overrides.get("skip_alignment_verify", pipe.get("skip_alignment_verify", False))
         ),
-        ignore_episodes_path=_resolve_ignore_episodes_path(
-            overrides.get("ignore_episodes_path", pipe.get("ignore_episodes_path"))
-        ),
+        ignore_episodes_paths=(ignore_paths := _resolve_ignore_episode_paths(pipe, overrides)),
+        ignore_episodes_path=ignore_paths[0] if ignore_paths else None,
         state_action_alignment=align_cfg,
         state_action_lag_recompute=bool(
             overrides.get("state_action_lag_recompute", sa.get("stats", {}).get("recompute", True))

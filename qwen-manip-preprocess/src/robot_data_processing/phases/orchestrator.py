@@ -149,6 +149,27 @@ def _load_episode_geometry(package_dir: Path, cfg: dict[str, Any]):
     raise RuntimeError(f"No episode geometry class in {mod_path}")
 
 
+def _mark_export_discard(
+    all_pairs: list[tuple[StandardEpisode, EpisodeResult | None]],
+    index: int,
+    standard: StandardEpisode,
+    result: EpisodeResult | None,
+    reasons: list[str],
+) -> None:
+    """Ensure P7 skips this episode even when quality never produced a result."""
+    if result is None:
+        result = EpisodeResult(
+            episode_index=int(standard.episode_index),
+            num_frames=int(standard.num_frames),
+            discard=True,
+            discard_reasons=list(reasons),
+        )
+        all_pairs[index] = (standard, result)
+        return
+    result.discard = True
+    result.discard_reasons.extend(reasons)
+
+
 def _apply_p6_geometry(
     all_pairs: list[tuple[StandardEpisode, EpisodeResult | None]],
     *,
@@ -163,7 +184,7 @@ def _apply_p6_geometry(
     wrist_view: list[str] = []
     geom_discards = 0
 
-    for standard, result in all_pairs:
+    for idx, (standard, result) in enumerate(all_pairs):
         ref = refs_by_ep.get(standard.episode_index)
         if ref is None:
             ref = EpisodeRef(
@@ -180,9 +201,13 @@ def _apply_p6_geometry(
         except Exception as exc:
             geom_discards += 1
             print(f"  [P6] discard ep{standard.episode_index}: {exc}", flush=True)
-            if result is not None:
-                result.discard = True
-                result.discard_reasons.append(f"p6_geometry_error:{exc}")
+            _mark_export_discard(
+                all_pairs,
+                idx,
+                standard,
+                result,
+                [f"p6_geometry_error:{exc}"],
+            )
             continue
 
         if geom.discard:
@@ -191,9 +216,13 @@ def _apply_p6_geometry(
                 f"  [P6] discard ep{standard.episode_index}: {geom.discard_reasons}",
                 flush=True,
             )
-            if result is not None:
-                result.discard = True
-                result.discard_reasons.extend(geom.discard_reasons)
+            _mark_export_discard(
+                all_pairs,
+                idx,
+                standard,
+                result,
+                list(geom.discard_reasons),
+            )
             continue
 
         standard.fields = geom.fields
@@ -221,6 +250,50 @@ def _apply_p6_geometry(
     return video_export_map, info_extras, wrist_view
 
 
+def _apply_episode_range(
+    refs: list[EpisodeRef], episode_range: tuple[int, int] | None
+) -> list[EpisodeRef]:
+    if episode_range is None:
+        return refs
+    start, end = episode_range
+    out = [r for r in refs if start <= int(r.episode_index) < end]
+    print(
+        f"[P0] episode-range [{start}, {end}): {len(refs)} -> {len(out)}",
+        flush=True,
+    )
+    return out
+
+
+def _apply_shard(
+    refs: list[EpisodeRef],
+    *,
+    shard_id: int | None,
+    num_shards: int | None,
+) -> list[EpisodeRef]:
+    if shard_id is None or num_shards is None:
+        return refs
+    if num_shards < 1:
+        raise ValueError(f"num_shards must be >= 1, got {num_shards}")
+    if not (0 <= shard_id < num_shards):
+        raise ValueError(f"shard_id must be in [0, {num_shards}), got {shard_id}")
+    out = [r for i, r in enumerate(refs) if i % num_shards == shard_id]
+    print(
+        f"[P0] shard {shard_id}/{num_shards}: {len(refs)} -> {len(out)} "
+        f"(by list position after sample/range)",
+        flush=True,
+    )
+    return out
+
+
+def _stats_cache_paths(stats_cache_dir: Path) -> dict[str, Path]:
+    root = Path(stats_cache_dir)
+    return {
+        "stats_cache_path": root / "global_stats.npz",
+        "stage1_stats_cache_path": root / "stage1_global_stats.npz",
+        "state_action_lag_cache_path": root / "state_action_lag.npz",
+    }
+
+
 def run_dataset_phases(
     *,
     package_dir: Path,
@@ -229,6 +302,12 @@ def run_dataset_phases(
     force_skip_gate: bool = False,
     sample_size: int | None = None,
     seed: int = 42,
+    episode_range: tuple[int, int] | None = None,
+    shard_id: int | None = None,
+    num_shards: int | None = None,
+    stats_cache_dir: Path | None = None,
+    stats_only: bool = False,
+    export_shard_only: bool = False,
     adapter_factory: Callable[[], Any] | None = None,
 ) -> int:
     package_dir = Path(package_dir)
@@ -266,11 +345,39 @@ def run_dataset_phases(
         total = ds.get("total_episodes")
         refs = discover_single_root(dataset_root, int(total) if total is not None else None)
 
+    sample_mode = str(pipe.get("sample_mode", "random")).lower()
     if sample_size is not None and sample_size < len(refs):
-        rng = np.random.default_rng(seed)
-        pick = sorted(rng.choice(len(refs), size=sample_size, replace=False).tolist())
-        refs = [refs[i] for i in pick]
+        if sample_mode in ("sequential", "seq", "head", "first"):
+            refs = refs[: int(sample_size)]
+            print(
+                f"[P0] sequential sample: first {len(refs)} episodes "
+                f"(indices {refs[0].episode_index}..{refs[-1].episode_index})",
+                flush=True,
+            )
+        else:
+            rng = np.random.default_rng(seed)
+            pick = sorted(rng.choice(len(refs), size=sample_size, replace=False).tolist())
+            refs = [refs[i] for i in pick]
+            print(f"[P0] random sample: {len(refs)} episodes (seed={seed})", flush=True)
+
+    refs = _apply_episode_range(refs, episode_range)
+    # Full sample (after range, before shard) — used for shared global stats.
+    stats_refs = list(refs)
+    refs = _apply_shard(refs, shard_id=shard_id, num_shards=num_shards)
     print(f"[P0] discovered {len(refs)} episodes (layout={layout})", flush=True)
+    if not refs and not stats_only:
+        raise RuntimeError("No episodes left after sample/range/shard selection")
+    if stats_cache_dir is not None:
+        Path(stats_cache_dir).mkdir(parents=True, exist_ok=True)
+        print(f"[P0] stats-cache-dir={Path(stats_cache_dir).resolve()}", flush=True)
+    if stats_only:
+        print(
+            f"[P0] stats-only: will compute stats on {len(stats_refs)} episodes "
+            f"(process/export skipped)",
+            flush=True,
+        )
+    if export_shard_only:
+        print("[P0] export-shard-only: v2.1 per-episode export, no renumber/v3/relative", flush=True)
 
     if adapter_factory is not None:
         adapter = adapter_factory()
@@ -326,7 +433,16 @@ def run_dataset_phases(
         "layout": layout,
         "output_mode": output_mode,
         "num_episodes": len(refs),
+        "num_stats_episodes": len(stats_refs),
         "quality_config": str(qpath),
+        "sharding": {
+            "episode_range": list(episode_range) if episode_range is not None else None,
+            "shard_id": shard_id,
+            "num_shards": num_shards,
+            "stats_cache_dir": str(stats_cache_dir) if stats_cache_dir is not None else None,
+            "stats_only": bool(stats_only),
+            "export_shard_only": bool(export_shard_only),
+        },
         "pipeline": {
             "num_workers": int(pipe.get("num_workers", 64)),
             "export_workers": pipe.get("export_workers"),
@@ -360,9 +476,87 @@ def run_dataset_phases(
     delay_samples: list[int] = []
     export_workers = int(pipe["export_workers"]) if pipe.get("export_workers") is not None else None
     parallel_videos = bool(pipe.get("parallel_videos", True))
-    # Always emit one flat LeRobot root; renumber when multi-root / part_task to avoid id clashes.
-    renumber_episodes = layout == "part_task"
+    # Flat LeRobot root: renumber for part_task, or when explicitly requested.
+    # Relative-statistics needs contiguous 0..N-1; enable via export.renumber_episodes
+    # or relative_statistics.enabled=true.
+    export_cfg_early = cfg.get("export") or {}
+    rel_cfg_early = cfg.get("relative_statistics") or {}
+    renumber_episodes = layout == "part_task" or bool(
+        export_cfg_early.get("renumber_episodes", False)
+    )
+    if bool(rel_cfg_early.get("enabled", False)):
+        renumber_episodes = True
+    if export_shard_only:
+        # Keep source episode_index as on-disk id so shards never collide.
+        renumber_episodes = False
     merged_task_name_to_index: dict[str, int] = {}
+
+    # Stats-only: compute shared caches on the pre-shard sample, then exit.
+    if stats_only:
+        if stats_cache_dir is None:
+            raise RuntimeError("stats_only requires stats_cache_dir")
+        cache_paths = _stats_cache_paths(Path(stats_cache_dir))
+        groups_stats = _group_refs_by_root(stats_refs)
+        for gi, (root, group_refs) in enumerate(sorted(groups_stats.items(), key=lambda x: str(x[0])), start=1):
+            eps = sorted({r.episode_index for r in group_refs})
+            quality_out = output_dir / "_quality"
+            if layout == "part_task":
+                part = group_refs[0].part or "part"
+                task = group_refs[0].task or "task"
+                quality_out = output_dir / "_quality" / part / task
+            quality_out.mkdir(parents=True, exist_ok=True)
+            print(
+                f"[P3/stats-only] [{gi}/{len(groups_stats)}] root={root} n={len(eps)} "
+                f"→ {stats_cache_dir}",
+                flush=True,
+            )
+            overrides = {
+                "dataset_root": str(root),
+                "output_dir": str(quality_out),
+                "output_mode": "report",
+                "num_workers": int(pipe.get("num_workers", 64)),
+                "temporal_align": temporal_align_cfg,
+                "stage2_fill_missing_action_eef": fill_missing_action_eef_flag,
+                "stats_recompute": True,
+                "stage1_stats_recompute": True,
+                "state_action_lag_recompute": True,
+                **{k: str(v) for k, v in cache_paths.items()},
+            }
+            if pipe.get("ignore_episodes_paths") is not None:
+                overrides["ignore_episodes_paths"] = pipe.get("ignore_episodes_paths")
+            elif pipe.get("ignore_episodes_path") is not None:
+                overrides["ignore_episodes_path"] = pipe.get("ignore_episodes_path")
+            pcfg = pipeline_config_from_yaml(yaml_cfg, overrides)
+            p3_timings: dict[str, float] = {}
+            t_p3 = time.perf_counter()
+            # Empty process list: only stats / lag caches are written.
+            run_pipeline(
+                pcfg,
+                [],
+                stats_episode_indices=eps,
+                show_progress=True,
+                timings=p3_timings,
+            )
+            _tick(f"p3_stats_only_group_{gi}", t_p3)
+            for k, v in p3_timings.items():
+                timings[f"group{gi}_{k}"] = v
+        elapsed = time.perf_counter() - t0
+        timings["total"] = round(elapsed, 3)
+        run_meta.update(
+            {
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "elapsed_sec": round(elapsed, 2),
+                "stats_only": True,
+                "stats_cache_files": {k: str(v) for k, v in cache_paths.items()},
+                "phase_timing": {"sec": timings, "total_min": round(elapsed / 60.0, 3)},
+            }
+        )
+        (output_dir / "run_meta.json").write_text(json.dumps(run_meta, indent=2), encoding="utf-8")
+        (output_dir / "phase_timing.json").write_text(
+            json.dumps(run_meta["phase_timing"], indent=2), encoding="utf-8"
+        )
+        print(f"=== Stats-only done in {elapsed/60:.1f} min → {stats_cache_dir} ===", flush=True)
+        return 0
 
     groups = _group_refs_by_root(refs)
     for gi, (root, group_refs) in enumerate(sorted(groups.items(), key=lambda x: str(x[0])), start=1):
@@ -390,6 +584,25 @@ def run_dataset_phases(
         }
         if export_workers is not None:
             overrides["export_workers"] = export_workers
+        # Prefer Dataclean package config ignore lists when present.
+        if pipe.get("ignore_episodes_paths") is not None:
+            overrides["ignore_episodes_paths"] = pipe.get("ignore_episodes_paths")
+        elif pipe.get("ignore_episodes_path") is not None:
+            overrides["ignore_episodes_path"] = pipe.get("ignore_episodes_path")
+        if stats_cache_dir is not None:
+            cache_paths = _stats_cache_paths(Path(stats_cache_dir))
+            overrides.update({k: str(v) for k, v in cache_paths.items()})
+            have_all = all(p.exists() for p in cache_paths.values())
+            if not have_all:
+                missing = [str(p) for p in cache_paths.values() if not p.exists()]
+                raise FileNotFoundError(
+                    "Shared stats cache incomplete. Run once with --stats-only "
+                    f"--stats-cache-dir {stats_cache_dir} first. Missing: {missing}"
+                )
+            overrides["stats_recompute"] = False
+            overrides["stage1_stats_recompute"] = False
+            overrides["state_action_lag_recompute"] = False
+            print(f"[P3] using shared stats cache: {stats_cache_dir}", flush=True)
         pcfg = pipeline_config_from_yaml(yaml_cfg, overrides)
         p3_timings: dict[str, float] = {}
         t_p3 = time.perf_counter()
@@ -404,6 +617,10 @@ def run_dataset_phases(
 
         align_stats: StateActionAlignStats | None = None
         lag_cache = quality_out / "cache" / "state_action_lag.npz"
+        if stats_cache_dir is not None:
+            shared_lag = Path(stats_cache_dir) / "state_action_lag.npz"
+            if shared_lag.exists():
+                lag_cache = shared_lag
         if p4_plan.compute_stats and lag_cache.exists():
             try:
                 align_stats = StateActionAlignStats.load(str(lag_cache))
@@ -573,6 +790,8 @@ def run_dataset_phases(
     # P7: one flat LeRobot dataset at output_dir (no per-task subfolders)
     export_cfg = cfg.get("export") or {}
     lerobot_version = str(export_cfg.get("lerobot_version", "v2.1")).lower()
+    if export_shard_only:
+        lerobot_version = "v2.1"
     v30_cfg = export_cfg.get("v30") or {}
     if output_mode in ("filter", "both") and all_pairs:
         from robot_data_processing.export_standard import export_standard_dataset
@@ -593,7 +812,8 @@ def run_dataset_phases(
             f"[P7] export → {output_dir} ({len(all_pairs)} candidates); "
             f"state_action_delay={state_action_delay} "
             f"export_workers={export_workers} renumber={renumber_episodes} "
-            f"v2_geometry={geometry_enabled} lerobot_version={lerobot_version}",
+            f"v2_geometry={geometry_enabled} lerobot_version={lerobot_version}"
+            f"{' shard_only' if export_shard_only else ''}",
             flush=True,
         )
         t_p7 = time.perf_counter()
@@ -634,6 +854,33 @@ def run_dataset_phases(
             keep_all_frames=bool(export_cfg.get("keep_all_frames", False)),
         )
         _tick("p7_standard_export", t_p7)
+        if export_shard_only:
+            manifest = {
+                "export_shard_only": True,
+                "shard_id": shard_id,
+                "num_shards": num_shards,
+                "output_root": str(output_dir),
+                "total_episodes": export_summary.get("total_episodes"),
+                "total_frames": export_summary.get("total_frames"),
+                "lerobot_version": "v2.1",
+                "renumber_episodes": False,
+            }
+            map_path = output_dir / "meta" / "episode_source_map.jsonl"
+            if map_path.exists():
+                src_ids = []
+                for line in map_path.read_text(encoding="utf-8").splitlines():
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    src_ids.append(int(row.get("source_episode_index", row["episode_index"])))
+                manifest["source_episode_indices"] = sorted(src_ids)
+            (output_dir / "shard_manifest.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8"
+            )
+            print(
+                f"[P7/shard] wrote shard_manifest.json episodes={manifest.get('total_episodes')}",
+                flush=True,
+            )
         if export_summary.get("lerobot_v30"):
             v30_summary = export_summary["lerobot_v30"]
             print(
@@ -642,7 +889,11 @@ def run_dataset_phases(
                 flush=True,
             )
             rel_cfg = cfg.get("relative_statistics") or {}
-            if geometry_enabled and rel_cfg.get("enabled", True):
+            if (
+                not export_shard_only
+                and geometry_enabled
+                and bool(rel_cfg.get("enabled", False))
+            ):
                 from robot_data_processing.relative_statistics import (
                     prepare_relative_action_statistics,
                 )

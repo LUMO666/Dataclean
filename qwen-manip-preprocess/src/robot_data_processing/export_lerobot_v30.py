@@ -334,6 +334,9 @@ def _get_video_duration_in_s(video_path: Path) -> float:
     return float(result.stdout.strip())
 
 
+V30_INTRINSIC_STORAGE = "meta/episodes/chunk-*/file-*.parquet::camera_intrinsics"
+
+
 def _convert_info(
     root: Path,
     new_root: Path,
@@ -354,6 +357,9 @@ def _convert_info(
         if info["features"][key].get("dtype") == "video":
             continue
         info["features"][key]["fps"] = info["fps"]
+    camera_geometry = info.get("camera_geometry")
+    if isinstance(camera_geometry, dict):
+        camera_geometry["intrinsic_storage"] = V30_INTRINSIC_STORAGE
     logger.info("Converting info from %s to %s", root, new_root)
     _write_json(new_root / INFO_PATH, info)
 

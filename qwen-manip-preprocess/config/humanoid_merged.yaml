@@ -23,7 +23,10 @@ pipeline:
   parallel_videos: true  # export 3 camera streams concurrently per episode
   recompute_video_stats: false  # skip ffmpeg pixel sampling during export
   skip_alignment_verify: false  # set true to skip post-export alignment scan
-  ignore_episodes_path: config/humanoid_merged_ignore_no_calibration.json
+  # Union of ignore sources (missing calibration + extrinsic outliers)
+  ignore_episodes_paths:
+    - config/humanoid_merged_ignore_no_calibration.json
+    - /mnt/pfs/Data/liuweilin/Dataclean/datasets/humanoid_merged/extrinsic_outliers_full_v2.json
 
 state_action_alignment:
   enabled: true  # compute lag stats when temporal_align.mode=stats

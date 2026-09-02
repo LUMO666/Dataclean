@@ -67,6 +67,7 @@ def main() -> int:
         "process_episodes": None,
         "ignored_episodes": None,
         "ignore_episodes_path": str(cfg.ignore_episodes_path) if cfg.ignore_episodes_path else None,
+        "ignore_episodes_paths": [str(p) for p in cfg.ignore_episodes_paths],
         "output_mode": args.output_mode,
         "num_workers": args.num_workers,
         "export_workers": cfg.export_workers,
@@ -87,10 +88,13 @@ def main() -> int:
     elapsed = time.perf_counter() - t0
 
     ignored = 0
-    if cfg.ignore_episodes_path:
-        from robot_data_processing.ignore_list import load_ignore_episode_list
+    if cfg.ignore_episodes_paths or cfg.ignore_episodes_path:
+        from robot_data_processing.ignore_list import load_ignore_episode_lists
 
-        ignored = len(load_ignore_episode_list(cfg.ignore_episodes_path))
+        paths = list(cfg.ignore_episodes_paths)
+        if not paths and cfg.ignore_episodes_path is not None:
+            paths = [cfg.ignore_episodes_path]
+        ignored = len(load_ignore_episode_lists(paths))
 
     discarded = sum(1 for r in results if r.discard)
     kept_frames = sum(r.kept_frames for r in results)

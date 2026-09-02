@@ -1,4 +1,10 @@
-"""Relative-action statistics for LeRobot v3 Episode Camera Geometry datasets."""
+"""Relative-action statistics for LeRobot v3 Episode Camera Geometry datasets.
+
+Hard-requires per-role eef position/rotation_6d, gripper closedness, and
+``extrinsic.camera_reference.T_Episode_CameraReference``. Arm
+``joint_position`` fields are optional: when both state and action joints exist
+for a role they are included; otherwise they are skipped.
+"""
 from __future__ import annotations
 
 import json
@@ -157,6 +163,7 @@ def _rotation_6d_to_matrices(values: np.ndarray, *, name: str) -> np.ndarray:
 
 
 def _arm_roles(info: dict[str, Any]) -> list[str]:
+    """Return eef roles. Hard-requires eef pose + gripper + camera reference; joints optional."""
     features = info.get("features")
     if not isinstance(features, dict):
         raise ValueError("info.json must declare a features object.")
@@ -184,6 +191,35 @@ def _arm_roles(info: dict[str, Any]) -> list[str]:
             f"Episode Camera Geometry statistics fields are missing: {missing}."
         )
     return roles
+
+
+def _joint_roles(info: dict[str, Any], roles: list[str]) -> list[str]:
+    """Roles that have both state and action arm joint_position features."""
+    features = info.get("features") or {}
+    out: list[str] = []
+    for role in roles:
+        state_key = f"observation.state.arm.{role}.joint_position"
+        action_key = f"action.arm.{role}.joint_position"
+        has_state = state_key in features
+        has_action = action_key in features
+        if has_state and has_action:
+            out.append(role)
+        elif has_state or has_action:
+            present = state_key if has_state else action_key
+            missing = action_key if has_state else state_key
+            raise ValueError(
+                f"Incomplete arm joint fields for role={role!r}: found {present}, "
+                f"missing {missing}. Provide both or neither."
+            )
+    return out
+
+
+def _joint_dim(info: dict[str, Any], role: str) -> int:
+    key = f"action.arm.{role}.joint_position"
+    shape = (info.get("features") or {}).get(key, {}).get("shape")
+    if isinstance(shape, list) and shape:
+        return int(shape[-1])
+    return 6
 
 
 def _episode_records(dataset_path: Path) -> list[dict[str, int]]:
@@ -270,6 +306,8 @@ def prepare_relative_action_statistics(
             "statistics_horizon_seconds * dataset FPS must be a positive integer."
         )
     roles = _arm_roles(info)
+    joint_roles = _joint_roles(info, roles)
+    joint_dims = {role: _joint_dim(info, role) for role in joint_roles}
     records = _episode_records(dataset_path)
     by_shard: dict[tuple[int, int], list[dict[str, int]]] = {}
     for row in records:
@@ -284,6 +322,10 @@ def prepare_relative_action_statistics(
         relative_fields[f"eef.{role}.position"] = _LeadMoments(horizon, 3)
         relative_fields[f"eef.{role}.rotation_6d"] = _LeadMoments(horizon, 6)
         relative_fields[f"gripper.{role}.closedness"] = _LeadMoments(horizon, 1)
+    for role in joint_roles:
+        relative_fields[f"arm.{role}.joint_position"] = _LeadMoments(
+            horizon, joint_dims[role]
+        )
 
     data_pattern = str(info["data_path"])
     required_columns = [REFERENCE_TRANSFORM_KEY]
@@ -297,7 +339,15 @@ def prepare_relative_action_statistics(
                 f"action.gripper.{role}.closedness",
             ]
         )
+    for role in joint_roles:
+        required_columns.extend(
+            [
+                f"observation.state.arm.{role}.joint_position",
+                f"action.arm.{role}.joint_position",
+            ]
+        )
 
+    joint_role_set = set(joint_roles)
     anchor_count = 0
     contributing_episodes = 0
     total_frames = 0
@@ -367,6 +417,28 @@ def prepare_relative_action_statistics(
                     _pad_rotation_mats(state_rotation_anchor), name=state_rotation_key
                 )
             )
+
+            state_joint = None
+            action_joint = None
+            if role in joint_role_set:
+                state_joint_key = f"observation.state.arm.{role}.joint_position"
+                action_joint_key = f"action.arm.{role}.joint_position"
+                state_joint = cached[state_joint_key].astype(np.float64)
+                action_joint = cached[action_joint_key].astype(np.float64)
+                if state_joint.ndim != 2 or state_joint.shape[1] != joint_dims[role]:
+                    raise ValueError(
+                        f"{state_joint_key} must have shape [N,{joint_dims[role]}], "
+                        f"got {state_joint.shape}."
+                    )
+                if action_joint.ndim != 2 or action_joint.shape[1] != joint_dims[role]:
+                    raise ValueError(
+                        f"{action_joint_key} must have shape [N,{joint_dims[role]}], "
+                        f"got {action_joint.shape}."
+                    )
+                anchor_state_joint = state_joint[anchors]
+            else:
+                anchor_state_joint = None
+
             for lead in range(horizon):
                 action_indices = anchors + lead
                 delta_position_episode = (
@@ -396,6 +468,10 @@ def prepare_relative_action_statistics(
                 relative_fields[f"gripper.{role}.closedness"].update(
                     lead, gripper[action_indices]
                 )
+                if action_joint is not None and anchor_state_joint is not None:
+                    relative_fields[f"arm.{role}.joint_position"].update(
+                        lead, action_joint[action_indices] - anchor_state_joint
+                    )
 
     if total_frames != int(info.get("total_frames", total_frames)):
         raise ValueError(
@@ -405,7 +481,7 @@ def prepare_relative_action_statistics(
     if anchor_count == 0:
         raise ValueError("Dataset has no complete statistics windows.")
 
-    payload = {
+    payload: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "source_fps": fps,
         "statistics_horizon_seconds": float(statistics_horizon_seconds),
@@ -429,6 +505,7 @@ def prepare_relative_action_statistics(
             for role in roles
         },
         "gripper_semantics": "absolute_target_closedness",
+        "joint_roles": list(joint_roles),
         "episode_count": len(records),
         "contributing_episode_count": contributing_episodes,
         "source_frame_count": total_frames,
@@ -438,6 +515,18 @@ def prepare_relative_action_statistics(
             key: value.to_json() for key, value in relative_fields.items()
         },
     }
+    if joint_roles:
+        payload["joint_delta_convention"] = "q_action - q_state_at_anchor"
+        payload["joint_source_fields"] = {
+            role: {
+                "state": f"observation.state.arm.{role}.joint_position",
+                "action": f"action.arm.{role}.joint_position",
+            }
+            for role in joint_roles
+        }
+    else:
+        payload["joint_delta_convention"] = None
+        payload["joint_source_fields"] = {}
     _atomic_json_dump(output_path, payload)
     return payload
 
@@ -472,6 +561,7 @@ def compare_relative_statistics(
         "incomplete_tail_policy",
         "position_delta_convention",
         "rotation_delta_convention",
+        "joint_delta_convention",
         "state_representation",
         "rotation_6d_convention",
         "relative_action_rotation_representation",
@@ -487,6 +577,8 @@ def compare_relative_statistics(
 
     if actual.get("rotation_source_fields") != expected.get("rotation_source_fields"):
         mismatches.append("rotation_source_fields mismatch")
+    if actual.get("joint_source_fields") != expected.get("joint_source_fields"):
+        mismatches.append("joint_source_fields mismatch")
 
     for section in ("state", "relative_action"):
         actual_section = actual.get(section) or {}

@@ -19,6 +19,14 @@ qwen-manip-preprocess/output/
 # humanoid_merged local review / smoke outputs
 datasets/humanoid_merged/manual_review/results/
 datasets/humanoid_merged/test*/
+datasets/humanoid_merged/shard_pilot_*/
+datasets/humanoid_merged/humanoid_v30_*_run*/
+datasets/humanoid_merged/smoke_n*/
+datasets/humanoid_merged/extrinsic_outliers*.json
+
+# egodex local review / pilot outputs
+datasets/egodex_lerobot_v21/manual_review/results/
+datasets/egodex_lerobot_v21/part1_n350_report/
 
 # Local caches & logs
 *.log
